@@ -49,19 +49,21 @@ RESOLUTION_TEMPLATE = """Оқушы аты-жөні:
 Оқушы курста қалды ма? """
 
 COMPLAINT_HELP = (
-    "📝 <b>Шағым шаблоны</b> (көшіріп, толтырыңыз):\n<code>" + COMPLAINT_TEMPLATE + "</code>\n\n"
-    "<b>Қызметі/Мәселе иесі:</b> " + " / ".join(ROLES) + "\n"
-    "<b>Мәселе атауы/типі:</b> " + " / ".join(ISSUE_TYPES) + "\n"
-    "<b>Пәні және потогы</b> форматы: <code>SMART ГЕО-31</code> (бірнеше пән: <code>SMART ФИЗ, МАТ-01</code>), "
-    "JUNIOR үшін: <code>JUNIOR БИО</code>\n"
-    "Қате болса хабарламаны <b>өңдеңіз (edit)</b> — бот қайта тексереді.")
+    "📝 <b>Шағым шаблоны</b>\n<code>" + COMPLAINT_TEMPLATE + "</code>\n"
+    "<blockquote expandable><b>Қызметі:</b> " + " / ".join(ROLES) + "\n"
+    "<b>Мәселе типі:</b> " + " / ".join(ISSUE_TYPES) + "\n"
+    "<b>Пән:</b> <code>SMART ГЕО-31</code>, бірнеше: <code>SMART ФИЗ, МАТ-01</code>, "
+    "JUNIOR: <code>JUNIOR БИО</code>\n"
+    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>")
 
 RESOLUTION_HELP = (
-    "📝 <b>Шешім шаблоны</b> (шағымға <b>reply</b> етіп жіберіңіз):\n<code>" + RESOLUTION_TEMPLATE + "</code>\n\n"
-    "<b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
+    "📝 <b>Шешім шаблоны</b> (шағымға reply)\n<code>" + RESOLUTION_TEMPLATE + "</code>\n"
+    "<blockquote expandable><b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
     "<b>Риза ма:</b> " + " / ".join(SATISFIED) + "\n"
-    "<b>Курста қалды ма:</b> " + " / ".join(STAYED) + "\n"
-    "Қате болса хабарламаны <b>өңдеңіз (edit)</b> — бот қайта тексереді.")
+    "<b>Қалды ма:</b> " + " / ".join(STAYED) + "\n"
+    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>")
+
+RESOLUTION_COMPACT = "<code>" + RESOLUTION_TEMPLATE + "</code>"
 
 
 def norm(s: str) -> str:
@@ -163,16 +165,16 @@ def validate_complaint(text: str):
             errors.append(f"«{label}» толтырылмаған")
     role = match_enum(f.get("role", ""), ROLES) if f.get("role") else None
     if f.get("role") and not role:
-        errors.append("«Қызметі/Мәселе иесі»: " + " / ".join(ROLES))
+        errors.append("«Қызметі»: тізімнен таңдаңыз (/shablon)")
     title = match_enum(f.get("title", ""), ISSUE_TYPES) if f.get("title") else None
     if f.get("title") and not title:
-        errors.append("«Мәселе атауы/типі» тізімнен болуы керек (/shablon)")
+        errors.append("«Мәселе типі»: тізімнен таңдаңыз (/shablon)")
     program, pairs = parse_subject(f.get("subject", ""))
     if f.get("subject"):
         if not pairs:
-            errors.append("«Пәні және потогы» танылмады. Мысал: SMART ГЕО-31")
+            errors.append("«Пән»: танылмады, мысал: SMART ГЕО-31")
         elif program != "junior" and any(not st for _, st in pairs):
-            errors.append("«Пәні және потогы»: ағын жоқ. Мысал: SMART ГЕО-31 (ағын = -01/-11/-21/-31)")
+            errors.append("«Пән»: ағын жоқ, мысал: SMART ГЕО-31")
     if errors:
         return None, errors, f
     parsed = {
@@ -192,21 +194,21 @@ def validate_resolution(text: str, student_expected: str | None):
     errors = []
     sol = f.get("solution", "").strip()
     if len(sol) < 30:
-        errors.append("«Мәселенің шешімі» тым қысқа немесе жоқ (кемінде 30 символ, нақты не істелгенін жазыңыз)")
+        errors.append("«Шешім»: тым қысқа (кемі 30 символ, не істелгенін жазыңыз)")
     just = match_enum(f.get("justified", ""), JUSTIFIED)
     sat = match_enum(f.get("satisfied", ""), SATISFIED)
     stay = match_enum(f.get("stayed", ""), STAYED)
     if not just:
-        errors.append("«Мәселе шындыққа негізделген бе?»: " + " / ".join(JUSTIFIED))
+        errors.append("«Негізделген бе?»: " + "/".join(JUSTIFIED))
     if not sat:
-        errors.append("«Оқушы риза ма?»: " + " / ".join(SATISFIED))
+        errors.append("«Риза ма?»: " + "/".join(SATISFIED))
     if not stay:
-        errors.append("«Оқушы курста қалды ма?»: " + " / ".join(STAYED))
+        errors.append("«Қалды ма?»: " + "/".join(STAYED))
     st = f.get("student", "").strip()
     if not st:
         errors.append("«Оқушы аты-жөні» жоқ")
     elif student_expected and not (set(norm(st).split()) & set(norm(student_expected).split())):
-        errors.append(f"«Оқушы аты-жөні» шағымдағымен сәйкес емес (шағымда: {student_expected})")
+        errors.append(f"«Оқушы»: шағымдағымен сәйкес емес ({student_expected})")
     if errors:
         return None, errors, f
     return {"edu_response": sol, "justified": just, "satisfied": sat, "stayed": stay}, [], f

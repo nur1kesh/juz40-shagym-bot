@@ -42,6 +42,7 @@ class FakeBot:
     def __init__(self):
         self.sent, self.copied, self.reactions = [], [], []
         self.fail_chat = None
+        self.deleted = []
         self._id = 5000
 
     async def send_message(self, chat_id, text, **kw):
@@ -62,6 +63,9 @@ class FakeBot:
 
     async def set_message_reaction(self, *a, **k):
         self.reactions.append(a)
+
+    async def delete_message(self, chat_id, msg_id):
+        self.deleted.append((chat_id, msg_id))
 
     def texts(self):
         return [m.text for m in self.sent]
@@ -191,7 +195,7 @@ def test_night_complaint_is_silent_then_sla_starts_when_team_is_notified(env):
     env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))   # дүйсенбі 11:00
     assert len(env.bot.sent) == 1
     assert "20.10 11:00" in env.bot.sent[0].text, env.bot.sent[0].text   # 24 сағат хабарланған сәттен
-    assert "МЕРЗІМ ӨТТІ" not in env.bot.sent[0].text
+    assert "Мерзім өтті" not in env.bot.sent[0].text
 
 
 def test_reminders_hourly_only_in_window_and_overdue_marker(env):
@@ -204,7 +208,7 @@ def test_reminders_hourly_only_in_window_and_overdue_marker(env):
     before = len(env.bot.sent)
     env.clock.set(2026, 10, 15, 3, 0); run(service.flush(env.bot)); assert len(env.bot.sent) == before
     env.clock.set(2026, 10, 15, 12, 30); run(service.flush(env.bot))
-    assert "МЕРЗІМ ӨТТІ" in env.bot.sent[-1].text
+    assert "Мерзім өтті" in env.bot.sent[-1].text
 
 
 def test_sunday_nothing_is_sent_and_monday_gets_one_reminder_not_flood(env):
@@ -234,20 +238,20 @@ def test_stale_error_notice_cancelled_when_fixed_before_it_was_sent(env):
     msg.text = complaint_text()
     run(bm.handle(msg, env.bot, True))
     env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))
-    assert not any("түзету керек" in t for t in env.bot.texts())
+    assert not any("Түзетіңіз" in t for t in env.bot.texts())
     assert len(C()) == 1
 
 
 def test_screenshot_without_text_prompts_template(env):
     post(env, TECH(), SMART, None, ctype="photo")
-    assert "мәтінсіз" in env.bot.sent[0].text and C() == []
+    assert "Мәтінсіз" in env.bot.sent[0].text and C() == []
 
 
 def test_chat_noise_is_ignored(env):
     post(env, TECH(), SMART, "рахмет")
     post(env, TECH(), SMART, "Қайырлы күн, бүгін сабақ қай уақытта басталады екен деп сұрап жатыр, кім біледі?" * 1)
     assert C() == []
-    assert len(env.bot.sent) == 1 and "шаблонсыз" in env.bot.sent[0].text   # тек ұзынына ескерту
+    assert len(env.bot.sent) == 1 and "Шаблонсыз" in env.bot.sent[0].text   # тек ұзынына ескерту
 
 
 def test_roster_member_message_is_not_a_complaint(env):
@@ -285,7 +289,7 @@ def test_other_tech_manager_cannot_close(env):
 def test_resolution_validation_errors_keep_complaint_open_and_edit_fixes(env):
     m = post(env, TECH(), SMART, complaint_text())
     r = post(env, COORD(), SMART, resolution_text(sat="мүмкін"), reply=m.message_id)
-    assert C()[0]["status"] == "open" and "Оқушы риза ма" in env.bot.sent[-1].text
+    assert C()[0]["status"] == "open" and "Риза ма" in env.bot.sent[-1].text
     r.text = resolution_text()
     run(bm.handle(r, env.bot, True))
     assert C()[0]["status"] == "resolved"
@@ -311,7 +315,7 @@ def test_loose_resolution_multiple_matches_asks_and_pick_closes(env):
     post(env, TECH(), SMART, complaint_text(student="Айдана Сәрсен", subject="SMART БИО-11", desc="басқа мәселе"))
     post(env, COORD(), SMART, resolution_text(student="Айдана Нұрлан").replace("Айдана Нұрлан", "Айдана"))
     q = env.bot.sent[-1]
-    assert "Бірнеше" in q.text
+    assert "Қай шағымға" in q.text
     cb = q.kb.inline_keyboard[0][0].callback_data
     pid, cid = cb.split(":")[1:]
     msg = run(service.finish_pending(env.bot, int(pid), int(cid)))
@@ -321,7 +325,7 @@ def test_loose_resolution_multiple_matches_asks_and_pick_closes(env):
 def test_loose_resolution_unknown_student(env):
     post(env, TECH(), SMART, complaint_text())
     post(env, COORD(), SMART, resolution_text(student="Бейтаныс Адам"))
-    assert C()[0]["status"] == "open" and "табылмады" in env.bot.sent[-1].text
+    assert C()[0]["status"] == "open" and "жоқ" in env.bot.sent[-1].text
 
 
 # ===================================================================== сыртқы сату
@@ -347,7 +351,7 @@ def test_external_without_program_asks_buttons_and_pick_routes(env):
     post(env, ext, EXT, complaint_text(subject="ГЕО-31"))
     c = C()[0]
     assert c["status"] == "awaiting_program"
-    assert "SMART/JUNIOR" in env.bot.sent[0].text
+    assert "SMART па" in env.bot.sent[0].text
     tgt = db.binding("smart_hate")
     parsed = json.loads(c["parsed"])
     coords, sups, notes = service.compute_responsible("smart", parsed)
@@ -378,7 +382,7 @@ def test_concurrent_flush_does_not_duplicate_messages(env):
     async def both():
         await asyncio.gather(service.flush(env.bot), service.flush(env.bot), service.flush(env.bot))
     run(both())
-    assert len([t for t in env.bot.texts() if "Жаңа шағым" in t]) == 1
+    assert len([t for t in env.bot.texts() if "🔔" in t]) == 1
 
 
 def test_echo_failure_does_not_repeat_target_notice(env):
@@ -421,3 +425,48 @@ def test_excel_formula_injection_is_neutralised(env):
 def test_subject_parsing(label, program, pairs):
     p, got = T.parse_subject(label)
     assert p == program and got == pairs
+
+
+# ===================================================================== чат таза болуы (қысқа хабарлар)
+def test_bot_messages_are_short(env):
+    post(env, TECH(), SMART, "Қайырлы күн, бүгін сабақ қай уақытта басталады екен деп сұрап жатыр, кім біледі?")
+    post(env, TECH(), SMART, None, ctype="photo")
+    post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))        # қате
+    post(env, TECH(), SMART, complaint_text(student="Басқа Бала", desc="x"))   # дұрыс
+    env.clock.add(hours=1); run(service.flush(env.bot))                  # еске салу
+    for m in env.bot.sent:
+        assert len(m.text) < 260, (len(m.text), m.text)
+
+
+def test_error_notice_is_deleted_when_fixed(env):
+    msg = post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))
+    err = env.bot.sent[0]
+    msg.text = complaint_text()
+    run(bm.handle(msg, env.bot, True))
+    assert (err.chat, err.id) in env.bot.deleted
+
+
+def test_notice_auto_deletes_after_ttl(env):
+    post(env, TECH(), SMART, None, ctype="photo")
+    n = env.bot.sent[0]
+    env.clock.add(minutes=10); run(service.flush(env.bot)); assert (n.chat, n.id) not in env.bot.deleted
+    env.clock.add(minutes=6); run(service.flush(env.bot)); assert (n.chat, n.id) in env.bot.deleted
+
+
+def test_reminders_are_digest_when_many_open(env):
+    for i in range(3):
+        post(env, TECH(), SMART, complaint_text(student=f"Оқушы Нөмір{i}", desc=f"мәселе {i}"))
+    sent_before = len(env.bot.sent)
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    new = env.bot.sent[sent_before:]
+    assert len(new) == 1, [m.text for m in new]                         # 3 емес, 1 хабарлама
+    assert "Шешілмеген шағымдар (3)" in new[0].text and new[0].text.count("t.me/c/") == 3
+
+
+def test_resolved_notice_short_in_topic_full_echo_for_external(env):
+    ext = post(env, EXTSELL(), EXT, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=C()[0]["target_msg"])
+    topic_msg = [m for m in env.bot.sent if m.chat == SMART[0] and "шешілді" in m.text][0]
+    echo_msg = [m for m in env.bot.sent if m.chat == EXT[0] and "шешілді" in m.text][0]
+    assert len(topic_msg.text) < 80 and "Оқушымен байланысқа" not in topic_msg.text
+    assert "Оқушымен байланысқа" in echo_msg.text

@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 
 from aiogram import Bot
@@ -34,20 +35,44 @@ def thr(t):
 
 
 # ---------------------------------------------------------------- хабарлама кезегі (тек жұмыс уақытында жіберіледі)
-def queue_notice(key: str, chat_id, thread_id, reply_to, text: str, buttons=None):
-    db.x("UPDATE notices SET sent=2 WHERE key=? AND sent=0", key)  # ескі қате хабары күші жойылды
-    db.x("INSERT INTO notices(key,chat_id,thread_id,reply_to,text,buttons) VALUES(?,?,?,?,?,?)",
-         key, chat_id, thread_id, reply_to, text, json.dumps(buttons) if buttons else None)
+def queue_notice(key: str, chat_id, thread_id, reply_to, text: str, buttons=None, ttl: int = 15):
+    """Қысқа ескерту кезекке тұрады. ttl - минуттан кейін өзі өшеді (0 - өшпейді)."""
+    db.x("UPDATE notices SET sent=2 WHERE key=? AND sent=0", key)  # ескі кезектегісінің күші жойылды
+    db.x("INSERT INTO notices(key,chat_id,thread_id,reply_to,text,buttons,ttl) VALUES(?,?,?,?,?,?,?)",
+         key, chat_id, thread_id, reply_to, text, json.dumps(buttons) if buttons else None, ttl)
 
 
-def cancel_notices(key: str):
+async def clear_notices(bot: Bot, key: str, keep_id: int | None = None):
+    """Кезектегіні болдырмайды, жіберілгенін чаттан өшіреді (қате түзетілгенде чат таза қалу үшін)."""
     db.x("UPDATE notices SET sent=2 WHERE key=? AND sent=0", key)
+    for n in db.q("SELECT * FROM notices WHERE key=? AND sent=1 AND msg_id IS NOT NULL AND id!=?",
+                  key, keep_id or -1):
+        try:
+            await bot.delete_message(n["chat_id"], n["msg_id"])
+        except Exception:
+            pass
+        db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", n["chat_id"], n["msg_id"])
+        db.x("UPDATE notices SET sent=2 WHERE id=?", n["id"])
+
+
+def track_ephemeral(chat_id: int, msg_id: int, minutes: float):
+    db.x("INSERT OR REPLACE INTO ephemeral VALUES(?,?,?)", chat_id, msg_id,
+         iso(now() + timedelta(minutes=minutes)))
+
+
+async def _sweep_ephemeral(bot: Bot):
+    for e in db.q("SELECT * FROM ephemeral"):
+        if parse_dt(e["delete_at"]) <= now():
+            try:
+                await bot.delete_message(e["chat_id"], e["msg_id"])
+            except Exception:
+                pass
+            db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", e["chat_id"], e["msg_id"])
 
 
 def errors_text(errors: list[str], kind: str) -> str:
     hint = "/shablon" if kind == "complaint" else "/shesim"
-    return ("❌ Шаблон бойынша түзету керек:\n• " + "\n• ".join(html.escape(e) for e in errors) +
-            f"\n\nХабарламаны <b>өңдеңіз (edit)</b> — бот қайта тексереді. Шаблон: {hint}")
+    return f"❌ Түзетіңіз (edit) · {hint}\n• " + "\n• ".join(html.escape(e) for e in errors)
 
 
 # ---------------------------------------------------------------- жауапты адамдар
@@ -76,16 +101,26 @@ def resp_json(coords, sups):
     return {"coords": [people.to_dict(p) for p in coords], "sups": [people.to_dict(p) for p in sups]}
 
 
-def tags_line(c) -> str:
+def tags_inline(c) -> str:
     resp = json.loads(c["responsible"] or "{}")
-    coords = [people.from_dict(d) for d in resp.get("coords", [])]
-    sups = [people.from_dict(d) for d in resp.get("sups", [])]
-    parts = []
-    if coords:
-        parts.append("Координатор: " + ", ".join(people.mention(p) for p in coords))
-    if sups:
-        parts.append("Супервайзер: " + ", ".join(people.mention(p) for p in sups))
-    return "\n".join(parts) or "Жауапты адам анықталмады"
+    people_ = [people.from_dict(d) for d in resp.get("coords", []) + resp.get("sups", [])]
+    return ", ".join(people.mention(p) for p in people_) or "жауапты анықталмады"
+
+
+def label(c) -> str:
+    p = json.loads(c["parsed"] or "{}")
+    bits = [PROGRAM_LABEL.get(c["program"], "?")]
+    if p.get("subject_label"):
+        bits.append(html.escape(re.sub(r"(?i)^\s*(smart|junior)\s*", "", p["subject_label"])) or "")
+    if p.get("issue_title"):
+        bits.append(html.escape(p["issue_title"]))
+    return " · ".join(b for b in bits if b)
+
+
+def msg_link(c) -> str:
+    cid = str(abs(c["target_chat"] or 0))
+    cid = cid[3:] if cid.startswith("100") else cid
+    return f"https://t.me/c/{cid}/{c['target_msg']}"
 
 
 def short(c) -> str:
@@ -108,8 +143,7 @@ def deadline(c) -> datetime:
 
 
 # ---------------------------------------------------------------- скриншот (мәтінсіз медиа)
-MEDIA_NOTICE = ("📎 Скриншот/файл мәтінсіз келді, шағым тіркелмеді. Шағымды шаблонмен жазыңыз — "
-                "скриншотты сол шаблон мәтінімен (caption) бірге жіберуге болады:\n\n")
+MEDIA_NOTICE = "📎 Мәтінсіз. Шаблон: /shablon"
 
 
 def track_media(msg, thread: int):
@@ -139,8 +173,7 @@ async def process_media_only(bot: Bot, msg):
         db.x("""INSERT OR IGNORE INTO media_groups VALUES(?,?,?,?,?,?,'pending')""",
              msg.chat.id, msg.media_group_id, thread, msg.message_id, msg.from_user.id, iso(now()))
         return
-    queue_notice(f"{msg.chat.id}:{msg.message_id}", msg.chat.id, thread, msg.message_id,
-                 MEDIA_NOTICE + T.COMPLAINT_HELP)
+    queue_notice(f"{msg.chat.id}:{msg.message_id}", msg.chat.id, thread, msg.message_id, MEDIA_NOTICE)
     await flush(bot)
 
 
@@ -148,7 +181,7 @@ def _warn_pending_albums():
     for g in db.q("SELECT * FROM media_groups WHERE status='pending'"):
         if now() - parse_dt(g["created_at"]) >= timedelta(seconds=30):
             queue_notice(f"{g['chat_id']}:{g['first_msg']}", g["chat_id"], g["thread"], g["first_msg"],
-                         MEDIA_NOTICE + T.COMPLAINT_HELP)
+                         MEDIA_NOTICE)
             db.x("UPDATE media_groups SET status='warned' WHERE chat_id=? AND group_id=?",
                  g["chat_id"], g["group_id"])
 
@@ -165,9 +198,7 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     if not labels:
         # шаблонсыз ұзын хабарлама - бір рет ескерту; қысқа чатқа үндемейміз
         if not existing and not edited and len(text.strip()) >= 60:
-            queue_notice(key, msg.chat.id, thread, msg.message_id,
-                         "📝 Шағым шаблонсыз жазылған. Төмендегі шаблонмен қайта жазыңыз (немесе осы хабарламаны өңдеңіз):\n\n"
-                         + T.COMPLAINT_HELP)
+            queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шаблонсыз. Шаблон: /shablon")
             await flush(bot)
         return
     if existing and existing["status"] == "resolved":
@@ -181,8 +212,8 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     program = parsed["program"] if external else ("smart" if role == "smart_hate" else "junior")
     if not external and parsed["program"] and parsed["program"] != program:
         queue_notice(key, msg.chat.id, thread, msg.message_id, errors_text(
-            [f"Бұл {PROGRAM_LABEL[program]} topic-і, ал «Пәні және потогы»-да {PROGRAM_LABEL[parsed['program']]} "
-             f"көрсетілген. Дұрыс topic-ке жазыңыз"], "complaint"))
+            [f"Бұл {PROGRAM_LABEL[program]} topic-і, ал пәнде {PROGRAM_LABEL[parsed['program']]} көрсетілген"],
+            "complaint"))
         await flush(bot)
         return
     if not existing:
@@ -190,10 +221,10 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
                     "('new','awaiting_program','open')", msg.from_user.id, text)
         if dup:
             queue_notice(key, msg.chat.id, thread, msg.message_id,
-                         f"ℹ️ Дәл осындай шағым #{dup['id']} қазір ашық — қайта тіркелмеді.")
+                         f"ℹ️ Бұл шағым #{dup['id']} ашық, қайталанбады.")
             await flush(bot)
             return
-    cancel_notices(key)
+    await clear_notices(bot, key)
     if program:
         coords, sups, notes = compute_responsible(program, parsed)
         resp, note = resp_json(coords, sups), "; ".join(notes)
@@ -233,8 +264,7 @@ def can_resolve(c, user) -> bool:
 
 def deny_notice(msg, thread: int, key: str):
     queue_notice(key, msg.chat.id, thread, msg.message_id,
-                 "⛔ Шешімді тек жауапты координатор/супервайзер жібере алады "
-                 "(шағымды жазған қызметкер шеше алмайды).")
+                 "⛔ Шешімді тек координатор/супервайзер жібере алады.")
 
 
 def find_complaint(chat_id: int, reply_to_id: int):
@@ -258,9 +288,7 @@ async def process_reply(bot: Bot, msg, edited: bool = False):
         return await flush(bot)
     if not labels:
         if not edited and can_resolve(c, msg.from_user) and len(text.strip()) >= 80:
-            queue_notice(key, msg.chat.id, thread, msg.message_id,
-                         "📝 Шешім шаблонмен жазылмаған. Шаблонды толтырып жіберіңіз (немесе хабарламаны өңдеңіз):\n\n"
-                         + T.RESOLUTION_HELP)
+            queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
             await flush(bot)
         return
     await _resolve(bot, msg, c, text, thread, key)
@@ -277,7 +305,7 @@ async def _resolve(bot: Bot, msg, c, text: str, thread: int, key: str):
         queue_notice(key, msg.chat.id, thread, msg.message_id, errors_text(errors, "resolution"))
         await flush(bot)
         return
-    cancel_notices(key)
+    await clear_notices(bot, key)
     db.x("INSERT INTO replies(complaint_id,user_id,user_name,text,kind,created_at) VALUES(?,?,?,?,?,?)",
          c["id"], msg.from_user.id, msg.from_user.full_name, text, "final", iso(now()))
     await close_complaint(bot, c["id"], msg.from_user.full_name, final)
@@ -308,18 +336,17 @@ async def process_loose_resolution(bot: Bot, msg, edited: bool = False):
              and can_resolve(c, msg.from_user)]
     if not cands:
         queue_notice(key, msg.chat.id, thread, msg.message_id,
-                     f"❓ «{html.escape(student)}» бойынша ашық шағым табылмады. Шағымға <b>reply</b> етіп жіберіңіз "
-                     f"немесе оқушы аты-жөнін шағымдағыдай жазыңыз.")
+                     f"❓ «{html.escape(student)}» бойынша ашық шағым жоқ. Шағымға reply етіңіз.")
         return await flush(bot)
-    cancel_notices(key)
+    await clear_notices(bot, key)
     if len(cands) == 1:
         return await _resolve(bot, msg, cands[0], text, thread, key)
     pid = db.x("INSERT INTO pending_res(chat_id,user_id,user_name,text) VALUES(?,?,?,?)",
                msg.chat.id, msg.from_user.id, msg.from_user.full_name, text)
     queue_notice(key, msg.chat.id, thread, msg.message_id,
-                 "❓ Бірнеше ашық шағым сәйкес келді. Қайсысына жауап?",
-                 [(f"{PROGRAM_LABEL.get(c['program'], '?')} #{c['id']} · "
-                   f"{json.loads(c['parsed']).get('subject_label', '')}", f"pick:{pid}:{c['id']}") for c in cands])
+                 "❓ Қай шағымға?",
+                 [(f"#{c['id']} · {json.loads(c['parsed']).get('subject_label', '')}", f"pick:{pid}:{c['id']}")
+                  for c in cands], ttl=0)
     await flush(bot)
 
 
@@ -369,6 +396,7 @@ async def flush(bot: Bot):
     """Кезекте тұрғанның бәрін жібереді. Жұмыс уақытынан тыс ештеңе жазбайды.
     Бір уақытта тек біреуі жұмыс істейді (handler мен ticker қосарланып жібермеуі үшін)."""
     _warn_pending_albums()
+    await _sweep_ephemeral(bot)  # өшіру - жазу емес, жұмыс уақытынан тыс та орындалады
     if not in_work_window():
         return
     lock = _locks.setdefault(id(asyncio.get_running_loop()), asyncio.Lock())
@@ -385,18 +413,22 @@ async def _flush(bot: Bot):
     t = now()
 
     for n in db.q("SELECT * FROM notices WHERE sent=0"):
-        status = 1
+        status, mid = 1, None
         try:
+            await clear_notices(bot, n["key"], keep_id=n["id"])  # бұрынғы нұсқасын өшіреміз
             kb = None
             if n["buttons"]:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=bt, callback_data=d)] for bt, d in json.loads(n["buttons"])])
-            await send(bot, n["chat_id"], n["thread_id"], n["text"], None, reply_to=n["reply_to"], markup=kb)
+            m = await send(bot, n["chat_id"], n["thread_id"], n["text"], None, reply_to=n["reply_to"], markup=kb)
+            mid = m.message_id
+            if n["ttl"]:
+                track_ephemeral(n["chat_id"], mid, n["ttl"])
             await asyncio.sleep(SEND_GAP)
         except Exception:
             log.exception("notice failed")
             status = 3
-        db.x("UPDATE notices SET sent=? WHERE id=?", status, n["id"])
+        db.x("UPDATE notices SET sent=?, msg_id=? WHERE id=?", status, mid, n["id"])
 
     for c in db.q("SELECT * FROM complaints WHERE status='awaiting_program'"):
         last = c["last_reminder_at"]
@@ -407,7 +439,7 @@ async def _flush(bot: Bot):
                 InlineKeyboardButton(text="SMART", callback_data=f"prog:{c['id']}:smart"),
                 InlineKeyboardButton(text="JUNIOR", callback_data=f"prog:{c['id']}:junior")]])
             await send(bot, c["src_chat"], c["src_thread"],
-                       f"❓ Шағым #{c['id']}: қай бағдарламаға жатады? (пәнде SMART/JUNIOR көрсетілмеген) Түймені басыңыз.",
+                       f"❓ #{c['id']}: SMART па, JUNIOR ма?",
                        c["id"], reply_to=c["src_msg"], markup=kb)
         except Exception:
             log.exception("program prompt failed for #%s", c["id"])
@@ -425,13 +457,18 @@ async def _flush(bot: Bot):
             log.exception("dispatch failed for #%s", c["id"])
             db.update("complaints", c["id"], last_reminder_at=iso(now()))
 
-    for c in db.q("SELECT * FROM complaints WHERE status='open'"):
-        if t - parse_dt(c["last_reminder_at"]) >= timedelta(minutes=REMINDER_EVERY_MIN):
-            try:
-                await _remind(bot, c, t)
-                await asyncio.sleep(SEND_GAP)
-            except Exception:
-                log.exception("reminder failed for #%s", c["id"])
+    due = [c for c in db.q("SELECT * FROM complaints WHERE status='open' ORDER BY id")
+           if t - parse_dt(c["last_reminder_at"]) >= timedelta(minutes=REMINDER_EVERY_MIN)]
+    groups: dict[tuple, list] = {}
+    for c in due:
+        groups.setdefault((c["target_chat"], c["target_thread"]), []).append(c)
+    for rows in groups.values():
+        try:
+            await _remind_group(bot, rows, t)
+            await asyncio.sleep(SEND_GAP)
+        except Exception:
+            log.exception("reminder failed")
+            for c in rows:
                 db.update("complaints", c["id"], last_reminder_at=iso(t))
 
     for c in db.q("SELECT * FROM complaints WHERE status='resolved' AND echo_done<2"):
@@ -462,18 +499,11 @@ async def _dispatch_new(bot: Bot, c):
             db.x("INSERT OR REPLACE INTO bot_msgs VALUES(?,?,?)", c["target_chat"], m.message_id, c["id"])
         target_msg = copies[0].message_id
         db.update("complaints", c["id"], target_msg=target_msg)
-    p = json.loads(c["parsed"] or "{}")
-    lines = [f"🔔 <b>Жаңа шағым {short(c)}</b>",
-             f"Жазған: {html.escape(c['author_name'] or '-')}"
-             + (" (сыртқы сату)" if c["source"] == "external" else ""),
-             tags_line(c)]
-    if p.get("stream") in STREAM_NAMES:
-        lines.append(f"Ағын: {STREAM_NAMES[p['stream']]}")
+    due = now() + timedelta(hours=SLA_HOURS)
+    lines = [f"🔔 <b>#{c['id']}</b> · {label(c)}" + (" · сыртқы сату" if c["source"] == "external" else ""),
+             tags_inline(c), f"⏳ {due:%d.%m %H:%M}"]
     if c["notes"]:
         lines.append(f"⚠️ {html.escape(c['notes'])}")
-    due = now() + timedelta(hours=SLA_HOURS)
-    lines.append(f"⏳ Мерзім: <b>{due:%d.%m %H:%M}</b> (24 сағат). "
-                 f"Шешкен соң шағымға <b>reply</b> арқылы шешім шаблонын жіберіңіз.")
     await send(bot, c["target_chat"], c["target_thread"], "\n".join(lines), c["id"],
                reply_to=target_msg, markup=TPL_KB)
     db.update("complaints", c["id"], status="open", last_reminder_at=iso(now()), notified_at=iso(now()))
@@ -486,33 +516,46 @@ async def _dispatch_new(bot: Bot, c):
             InlineKeyboardButton(text="Тех.менеджер", callback_data=f"role:{c['id']}:tech"),
             InlineKeyboardButton(text="Ішкі сату", callback_data=f"role:{c['id']}:internal")]])
         await send(bot, c["src_chat"], c["src_thread"],
-                   f"{html.escape(c['author_name'])}, сіз кімсіз? (бір рет қана, Excel парағы үшін)",
+                   f"👤 {html.escape(c['author_name'].split('|')[0].strip())}: рөліңіз? (бір рет)",
                    c["id"], reply_to=c["src_msg"], markup=kb)
 
 
-async def _remind(bot: Bot, c, t: datetime):
-    age = t - sla_start(c)
-    hrs = int(age.total_seconds() // 3600)
-    over = age > timedelta(hours=SLA_HOURS)
-    head = (f"🚨 <b>МЕРЗІМ ӨТТІ ({hrs} сағ)</b> — шағым {short(c)} шешілмеді!" if over
-            else f"⏰ Еске салу: шағым {short(c)} әлі шешілмеді ({hrs} сағ өтті, мерзім {deadline(c):%d.%m %H:%M}).")
-    text = f"{head}\n{tags_line(c)}\nШешсеңіз — шағымға <b>reply</b> арқылы шешім шаблонын жіберіңіз."
-    await send(bot, c["target_chat"], c["target_thread"], text, c["id"],
-               reply_to=c["target_msg"], markup=TPL_KB)
-    db.update("complaints", c["id"], last_reminder_at=iso(t), reminder_count=(c["reminder_count"] or 0) + 1)
+async def _remind_group(bot: Bot, rows: list, t: datetime):
+    """Бір topic-те бір уақытта бірнеше шағым болса - бір ортақ хабарлама (чат толмауы үшін)."""
+    def hours(c):
+        return int((t - sla_start(c)).total_seconds() // 3600)
+
+    def over(c):
+        return t - sla_start(c) > timedelta(hours=SLA_HOURS)
+
+    first = rows[0]
+    if len(rows) == 1:
+        c = first
+        head = (f"🚨 <b>Мерзім өтті</b> · #{c['id']} · {label(c)} · {hours(c)} сағ" if over(c)
+                else f"⏰ Еске салу · #{c['id']} · {label(c)} · {hours(c)} сағ (мерзім {deadline(c):%d.%m %H:%M})")
+        await send(bot, c["target_chat"], c["target_thread"], f"{head}\n{tags_inline(c)}", c["id"],
+                   reply_to=c["target_msg"], markup=TPL_KB)
+    else:
+        lines = [f"⏰ <b>Шешілмеген шағымдар ({len(rows)})</b>"]
+        for c in rows[:25]:
+            lines.append(f'<a href="{msg_link(c)}">#{c["id"]}</a> · {label(c)} · {hours(c)} сағ'
+                         f'{" 🚨" if over(c) else ""}\n└ {tags_inline(c)}')
+        await send(bot, first["target_chat"], first["target_thread"], "\n".join(lines), None)
+    for c in rows:
+        db.update("complaints", c["id"], last_reminder_at=iso(t), reminder_count=(c["reminder_count"] or 0) + 1)
 
 
 async def _notify_resolved(bot: Bot, c):
     """echo_done: 0 - ештеңе жіберілмеген, 1 - шағым topic-іне жіберілді, 2 - бәрі дайын (қайталау болмауы үшін)."""
     f = json.loads(c["final"] or "{}")
-    text = (f"✅ Шағым {short(c)} шешілді ({html.escape(c['resolved_by'] or '')}).\n"
-            f"<b>Шешім:</b> {html.escape(f.get('edu_response') or '-')}")
+    text = f"✅ <b>#{c['id']}</b> шешілді · {html.escape((c['resolved_by'] or '').split('|')[0].strip())}"
+    echo = text + "\n" + html.escape((f.get("edu_response") or "-")[:500])
     if c["echo_done"] < 1:
         await send(bot, c["target_chat"], c["target_thread"], text, c["id"], reply_to=c["target_msg"])
         db.update("complaints", c["id"], echo_done=1 if c["source"] == "external" else 2)
     if c["source"] == "external":
         db.update("complaints", c["id"], echo_done=2)  # сәтсіз болса да қайталамаймыз (дубль болмасын)
-        await send(bot, c["src_chat"], c["src_thread"], text, c["id"], reply_to=c["src_msg"])
+        await send(bot, c["src_chat"], c["src_thread"], echo, c["id"], reply_to=c["src_msg"])
 
 
 def fmt_open_list() -> str:
@@ -523,5 +566,5 @@ def fmt_open_list() -> str:
     out = []
     for c in rows:
         age = int((t - parse_dt(c["created_at"])).total_seconds() // 3600)
-        out.append(f"{short(c)} — {age} сағ, {c['status']}")
+        out.append(f"#{c['id']} · {label(c)} — {age} сағ")
     return "\n".join(out)

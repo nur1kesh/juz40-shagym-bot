@@ -52,8 +52,10 @@ async def send_template(msg: Message, bot: Bot, text: str, command: CommandObjec
     if "pin" in (command.args or "") and await is_admin(bot, msg.chat.id, msg.from_user.id):
         try:
             await bot.pin_chat_message(msg.chat.id, m.message_id, disable_notification=True)
+            return  # pin жасалған шаблон өшпейді
         except Exception:
-            await msg.answer("Pin жасау үшін ботқа 'Pin messages' құқығы керек")
+            await msg.answer("Pin үшін ботқа 'Pin messages' құқығы керек")
+    service.track_ephemeral(msg.chat.id, m.message_id, 5)  # чат таза қалу үшін 5 мин кейін өшеді
 
 
 @dp.message(Command("shablon"))
@@ -147,7 +149,7 @@ async def cb_program(cb: CallbackQuery, bot: Bot):
               target_chat=tgt["chat_id"], target_thread=tgt["thread_id"],
               responsible=service.resp_json(coords, sups),
               notes="; ".join(notes))
-    await cb.message.edit_text(f"Шағым #{cid} → {program.upper()}")
+    await cb.message.delete()
     await cb.answer()
     await service.flush(bot)
 
@@ -160,13 +162,14 @@ async def cb_pick(cb: CallbackQuery, bot: Bot):
                     and not await is_admin(bot, cb.message.chat.id, cb.from_user.id)):
         return await cb.answer("Тек шешімді жазған адам немесе админ", show_alert=True)
     result = await service.finish_pending(bot, int(pid), int(cid))
-    await cb.message.edit_text(result)
-    await cb.answer()
+    await cb.message.delete()
+    await cb.answer(result, show_alert=not result.startswith("✅"))
 
 
 @dp.callback_query(F.data == "tpl:res")
 async def cb_template(cb: CallbackQuery):
-    await cb.message.answer(T.RESOLUTION_HELP, parse_mode="HTML")
+    m = await cb.message.answer(T.RESOLUTION_COMPACT, parse_mode="HTML")
+    service.track_ephemeral(m.chat.id, m.message_id, 2)  # 2 мин кейін өшеді
     await cb.answer()
 
 
@@ -178,7 +181,7 @@ async def cb_role(cb: CallbackQuery, bot: Bot):
         return await cb.answer("Тек жазған адам таңдай алады", show_alert=True)
     db.set_staff_role(c["author_id"], role)
     db.x("UPDATE complaints SET author_role=? WHERE author_id=? AND author_role IS NULL", role, c["author_id"])
-    await cb.message.edit_text(f"✅ {c['author_name']} → {'Тех.менеджер' if role == 'tech' else 'Ішкі сату'}")
+    await cb.message.delete()
     await cb.answer()
 
 

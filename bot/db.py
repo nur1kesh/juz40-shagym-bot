@@ -41,11 +41,18 @@ CREATE TABLE IF NOT EXISTS media_msgs(
 CREATE TABLE IF NOT EXISTS media_groups(
   chat_id INTEGER, group_id TEXT, thread INTEGER, first_msg INTEGER, user_id INTEGER,
   created_at TEXT, status TEXT, PRIMARY KEY(chat_id, group_id));
+CREATE TABLE IF NOT EXISTS ephemeral(
+  chat_id INTEGER, msg_id INTEGER, delete_at TEXT, PRIMARY KEY(chat_id, msg_id));
 CREATE INDEX IF NOT EXISTS ix_c_status ON complaints(status);
 """)
 for col in ("review_needed", "review_asked"):
     try:
         conn.execute(f"ALTER TABLE complaints ADD COLUMN {col} INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+for col in ("msg_id INTEGER", "ttl INTEGER DEFAULT 15"):
+    try:
+        conn.execute(f"ALTER TABLE notices ADD COLUMN {col}")
     except sqlite3.OperationalError:
         pass
 try:
