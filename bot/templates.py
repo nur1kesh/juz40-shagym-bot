@@ -1,0 +1,212 @@
+"""Шағым және шешім шаблондары: кодпен талдау және тексеру (OpenAI керек емес)."""
+import difflib
+import re
+
+ROLES = ["Куратор", "Координатор", "Мұғалім", "Ішкі сату менеджері", "Сыртқы сату менеджері", "Курс",
+         "Қолдау қызметі"]
+ISSUE_TYPES = ["Нәтижеге қанағаттанбау", "Кеш жауап беру", "Куратор ауыстыру", "Дөрекілігі",
+               "Куратордың ұнамауы", "Дұрыс емес қарым-қатынас", "Жеке мәселе", "меңгерушіден келген запрос",
+               "Тапсырманы шынайы тексермейді", "Куратор қатал", "Мұғалім мәселесі", "Тапсырманы кеш тексереді",
+               "Сұраққа толық жауап бермейді", "Сөйлеу мәнері ұнамайды", "Курс системасы", "Менеджер қателігі",
+               "Рейтинг жіберілмеді", "Байланысқа шықпады", "Деңгей көтерілмеді", "Жұмысы сапасы",
+               "Материал мәселесі", "Менеджер мәселесі", "Топ ауыстыру"]
+JUSTIFIED = ["Негізделген", "Жартылай негізделген", "Негізделмеген", "КБ бермеді"]
+SATISFIED = ["Иә", "Жоқ", "КБ бермеді"]
+STAYED = ["Иә", "Жоқ"]
+SYNONYMS = {"да": "Иә", "иа": "Иә", "ия": "Иә", "yes": "Иә", "нет": "Жоқ", "жок": "Жоқ", "no": "Жоқ"}
+
+COMPLAINT_LABELS = {
+    "student": ["Оқушы аты-жөні", "Оқушы аты жөні"],
+    "phone": ["Телефон нөмірі", "Телефон"],
+    "email": ["Почта", "Email", "E-mail"],
+    "subject": ["Пәні және потогы", "Пәні және потоғы", "Пән және потог"],
+    "employee": ["Қызметкердің аты-жөні", "Қызметкер аты-жөні"],
+    "role": ["Қызметі/Мәселе иесі", "Қызметі / Мәселе иесі", "Қызметі", "Мәселе иесі"],
+    "title": ["Мәселе атауы/типі", "Мәселе атауы / типі", "Мәселе атауы", "Мәселе типі"],
+    "desc": ["Мәселенің толық сипаттамасы", "Мәселенің сипаттамасы"],
+}
+RESOLUTION_LABELS = {
+    "student": ["Оқушы аты-жөні", "Оқушы аты жөні"],
+    "solution": ["Мәселенің толық шешімі", "Мәселенің шешімі", "Толық шешімі"],
+    "justified": ["Мәселе шындыққа негізделген бе"],
+    "satisfied": ["Оқушы риза ма"],
+    "stayed": ["Оқушы курста қалды ма"],
+}
+
+COMPLAINT_TEMPLATE = """Оқушы аты-жөні:
+Телефон нөмірі:
+Почта:
+Пәні және потогы: SMART ГЕО-31
+Қызметкердің аты-жөні:
+Қызметі/Мәселе иесі:
+Мәселе атауы/типі:
+Мәселенің толық сипаттамасы: """
+
+RESOLUTION_TEMPLATE = """Оқушы аты-жөні:
+Мәселенің шешімі:
+Мәселе шындыққа негізделген бе?
+Оқушы риза ма?
+Оқушы курста қалды ма? """
+
+COMPLAINT_HELP = (
+    "📝 <b>Шағым шаблоны</b> (көшіріп, толтырыңыз):\n<code>" + COMPLAINT_TEMPLATE + "</code>\n\n"
+    "<b>Қызметі/Мәселе иесі:</b> " + " / ".join(ROLES) + "\n"
+    "<b>Мәселе атауы/типі:</b> " + " / ".join(ISSUE_TYPES) + "\n"
+    "<b>Пәні және потогы</b> форматы: <code>SMART ГЕО-31</code> (бірнеше пән: <code>SMART ФИЗ, МАТ-01</code>), "
+    "JUNIOR үшін: <code>JUNIOR БИО</code>\n"
+    "Қате болса хабарламаны <b>өңдеңіз (edit)</b> — бот қайта тексереді.")
+
+RESOLUTION_HELP = (
+    "📝 <b>Шешім шаблоны</b> (шағымға <b>reply</b> етіп жіберіңіз):\n<code>" + RESOLUTION_TEMPLATE + "</code>\n\n"
+    "<b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
+    "<b>Риза ма:</b> " + " / ".join(SATISFIED) + "\n"
+    "<b>Курста қалды ма:</b> " + " / ".join(STAYED) + "\n"
+    "Қате болса хабарламаны <b>өңдеңіз (edit)</b> — бот қайта тексереді.")
+
+
+def norm(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s)).strip()
+
+
+def parse(text: str, labels: dict[str, list[str]]) -> dict[str, str]:
+    """`Белгі: мән` жолдарын оқиды; мән келесі белгіге дейін көп жолды болуы мүмкін."""
+    aliases = sorted(((a, k) for k, al in labels.items() for a in al), key=lambda x: -len(x[0]))
+    pats = [(k, re.compile(r"^\s*(?:\d+\s*[.)]\s*)?" + re.escape(a) + r"(?!\w)\s*\??\s*[:：\-–—]?\s*(.*)$", re.I))
+            for a, k in aliases]
+    out: dict[str, str] = {}
+    cur = None
+    for line in (text or "").splitlines():
+        for k, p in pats:
+            m = p.match(line)
+            if m:
+                cur = k
+                out[k] = m.group(1).strip()
+                break
+        else:
+            if cur:
+                out[cur] = (out[cur] + "\n" + line.strip()).strip()
+    for k, v in out.items():  # толтырылмай қалған "A/B/C/D" тізімін бос деп санаймыз
+        if k not in ("desc", "solution") and v.count("/") >= 3:
+            out[k] = ""
+    return out
+
+
+def match_enum(val: str, options: list[str]) -> str | None:
+    n = norm(val)
+    if not n:
+        return None
+    if n in SYNONYMS and SYNONYMS[n] in options:
+        return SYNONYMS[n]
+    by_norm = {norm(o): o for o in options}
+    if n in by_norm:
+        return by_norm[n]
+    if len(n) >= 3:
+        cands = [o for k, o in by_norm.items() if k.startswith(n) or n.startswith(k)]
+        if len(cands) == 1:
+            return cands[0]
+    m = difflib.get_close_matches(n, list(by_norm), n=1, cutoff=0.72)
+    return by_norm[m[0]] if m else None
+
+
+# ------------------------------------------------------------------ пән және ағын
+SUBJECT_ALIASES = {
+    "ИНФО": "ИНФО", "ИНФОРМАТИКА": "ИНФО", "ФИЗ": "ФИЗ", "ФИЗИКА": "ФИЗ", "МАТ": "МАТ", "МАТЕМАТИКА": "МАТ",
+    "ГЕОМ": "ГЕОМ", "ГЕОМЕТРИЯ": "ГЕОМ", "ХИМ": "ХИМ", "ХИМИЯ": "ХИМ", "БИО": "БИО", "БИОЛОГИЯ": "БИО",
+    "МС": "МС", "ГЕО": "ГЕО", "ГЕОГРАФИЯ": "ГЕО", "АНГЛ": "АНГЛ", "АНГЛИЙСКИЙ": "АНГЛ",
+    "ӘДЕБТІЛ": "ӘДЕБТІЛ", "ТІЛ": "ӘДЕБТІЛ", "РУСЛИТ": "РУСЛИТ", "ОРЫС": "РУСЛИТ", "АҒЫЛШЫН": "АНГЛ", "ДЖТ": "ДЖТ", "ТАРИХ": "ТАРИХ", "Т": "ТАРИХ",
+    "ҚҰҚЫҚ": "ҚҰҚЫҚ", "ҚУҚЫҚ": "ҚҰҚЫҚ", "ТОЕФЛ": "ТОЕФЛ",
+}
+_KEYS_BY_LEN = sorted((k for k in SUBJECT_ALIASES if len(k) >= 3 and k != "ТІЛ"), key=len, reverse=True)
+
+
+def _subject(tok: str) -> str | None:
+    if tok in SUBJECT_ALIASES:
+        return SUBJECT_ALIASES[tok]
+    for k in _KEYS_BY_LEN:
+        if tok.startswith(k):
+            return SUBJECT_ALIASES[k]
+    return None
+
+
+def parse_subject(label: str):
+    """'SMART ФИЗ, МАТ-01' -> ('smart', [('ФИЗ','01'), ('МАТ','01')])"""
+    up = (label or "").upper()
+    program = "smart" if "SMART" in up else "junior" if "JUNIOR" in up else None
+    up = re.sub(r"SMART|JUNIOR", " ", up)
+    items: list[list] = []  # [пән|None, ағын|None]; танылмаған сөздер де ағынды тасиды ("Орыс тілі-21")
+    for m in re.finditer(r"([A-ZА-ЯӘІҢҒҮҰҚӨҺ]+)\s*(?:-\s*(\d{2})(?!\d))?", up):
+        items.append([_subject(m.group(1)), m.group(2)])
+    carry = None
+    for it in reversed(items):  # ағын алдыңғы пәндерге де қолданылады
+        if it[1]:
+            carry = it[1]
+        else:
+            it[1] = carry
+    pairs = [it for it in items if it[0]]
+    return program, [tuple(p) for p in pairs]
+
+
+# ------------------------------------------------------------------ шағымды тексеру
+URL_RE = re.compile(r"https?://\S+|t\.me/\S+", re.I)
+REQUIRED_C = {"student": "Оқушы аты-жөні", "subject": "Пәні және потогы", "employee": "Қызметкердің аты-жөні",
+              "role": "Қызметі/Мәселе иесі", "title": "Мәселе атауы/типі",
+              "desc": "Мәселенің толық сипаттамасы"}
+
+
+def validate_complaint(text: str):
+    """-> (parsed | None, errors, labels_found)"""
+    f = parse(text, COMPLAINT_LABELS)
+    errors = []
+    for k, label in REQUIRED_C.items():
+        if not f.get(k, "").strip():
+            errors.append(f"«{label}» толтырылмаған")
+    role = match_enum(f.get("role", ""), ROLES) if f.get("role") else None
+    if f.get("role") and not role:
+        errors.append("«Қызметі/Мәселе иесі»: " + " / ".join(ROLES))
+    title = match_enum(f.get("title", ""), ISSUE_TYPES) if f.get("title") else None
+    if f.get("title") and not title:
+        errors.append("«Мәселе атауы/типі» тізімнен болуы керек (/shablon)")
+    program, pairs = parse_subject(f.get("subject", ""))
+    if f.get("subject"):
+        if not pairs:
+            errors.append("«Пәні және потогы» танылмады. Мысал: SMART ГЕО-31")
+        elif program != "junior" and any(not st for _, st in pairs):
+            errors.append("«Пәні және потогы»: ағын жоқ. Мысал: SMART ГЕО-31 (ағын = -01/-11/-21/-31)")
+    if errors:
+        return None, errors, f
+    parsed = {
+        "student_name": f["student"], "phone": f.get("phone") or "", "email": f.get("email") or "",
+        "program": program, "pairs": [list(p) for p in pairs],
+        "subjects": [s for s, _ in pairs], "stream": next((st for _, st in pairs if st), None),
+        "subject_label": f["subject"].strip(), "employee_name": f["employee"],
+        "employee_role": role, "issue_title": title, "description": f["desc"],
+        "chat_link": (URL_RE.search(text).group(0) if URL_RE.search(text) else None),
+        "mentioned_usernames": re.findall(r"@(\w{4,})", text),
+    }
+    return parsed, [], f
+
+
+def validate_resolution(text: str, student_expected: str | None):
+    f = parse(text, RESOLUTION_LABELS)
+    errors = []
+    sol = f.get("solution", "").strip()
+    if len(sol) < 30:
+        errors.append("«Мәселенің шешімі» тым қысқа немесе жоқ (кемінде 30 символ, нақты не істелгенін жазыңыз)")
+    just = match_enum(f.get("justified", ""), JUSTIFIED)
+    sat = match_enum(f.get("satisfied", ""), SATISFIED)
+    stay = match_enum(f.get("stayed", ""), STAYED)
+    if not just:
+        errors.append("«Мәселе шындыққа негізделген бе?»: " + " / ".join(JUSTIFIED))
+    if not sat:
+        errors.append("«Оқушы риза ма?»: " + " / ".join(SATISFIED))
+    if not stay:
+        errors.append("«Оқушы курста қалды ма?»: " + " / ".join(STAYED))
+    st = f.get("student", "").strip()
+    if not st:
+        errors.append("«Оқушы аты-жөні» жоқ")
+    elif student_expected and not (set(norm(st).split()) & set(norm(student_expected).split())):
+        errors.append(f"«Оқушы аты-жөні» шағымдағымен сәйкес емес (шағымда: {student_expected})")
+    if errors:
+        return None, errors, f
+    return {"edu_response": sol, "justified": just, "satisfied": sat, "stayed": stay}, [], f

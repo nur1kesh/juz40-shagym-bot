@@ -1,0 +1,423 @@
+"""Бизнес-логика сценарийлері: жалған Telegram + басқарылатын сағат. Нақты желі/OpenAI керек емес."""
+import asyncio
+import io
+import json
+import os
+import tempfile
+from datetime import datetime, timedelta
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
+
+import pytest
+
+os.environ.update(BOT_TOKEN="1:x", OPENAI_API_KEY="sk-x",
+                  DB_PATH=os.path.join(tempfile.mkdtemp(), "t.db"))
+
+from bot import config, db, exporter, service, templates as T  # noqa: E402
+import bot.main as bm  # noqa: E402
+
+REAL_WINDOW = config.in_work_window
+SMART, JUNIOR, EXT = (-100, 5), (-100, 6), (-200, 9)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+class Clock:
+    def __init__(self, dt):
+        self.dt = dt
+
+    def now(self):
+        return self.dt
+
+    def set(self, y, m, d, h=12, mi=0):
+        self.dt = datetime(y, m, d, h, mi, tzinfo=config.TZ)
+
+    def add(self, **kw):
+        self.dt += timedelta(**kw)
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent, self.copied, self.reactions = [], [], []
+        self.fail_chat = None
+        self._id = 5000
+
+    async def send_message(self, chat_id, text, **kw):
+        if self.fail_chat == chat_id:
+            raise RuntimeError("boom")
+        self._id += 1
+        self.sent.append(NS(chat=chat_id, thread=kw.get("message_thread_id"), text=text,
+                            reply_to=kw.get("reply_to_message_id"), kb=kw.get("reply_markup"), id=self._id))
+        return NS(message_id=self._id)
+
+    async def copy_messages(self, chat_id, from_chat_id, ids, **kw):
+        self.copied.append((chat_id, list(ids)))
+        out = []
+        for _ in ids:
+            self._id += 1
+            out.append(NS(message_id=self._id))
+        return out
+
+    async def set_message_reaction(self, *a, **k):
+        self.reactions.append(a)
+
+    def texts(self):
+        return [m.text for m in self.sent]
+
+
+@pytest.fixture(autouse=True)
+def env(monkeypatch):
+    for t in ("bindings", "users", "complaints", "replies", "bot_msgs", "notices", "pending_res",
+              "media_msgs", "media_groups"):
+        db.x(f"DELETE FROM {t}")
+    db.bind("smart_hate", *SMART)
+    db.bind("junior_hate", *JUNIOR)
+    db.bind("external_hate", *EXT)
+    clock = Clock(datetime(2026, 10, 14, 12, 0, tzinfo=config.TZ))  # сәрсенбі
+    monkeypatch.setattr(config, "now", clock.now)
+    monkeypatch.setattr(service, "SEND_GAP", 0)
+    monkeypatch.setattr(service, "now", clock.now)
+    monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
+    monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
+    return NS(clock=clock, bot=FakeBot())
+
+
+_mid = [0]
+_users = {}
+
+
+def U(uid, name, username=None):
+    u = NS(id=uid, full_name=name, username=username, is_bot=False)
+    db.remember_user(u)
+    return u
+
+
+TECH = lambda: U(1, "Бекарыс Алишер | қолдау")  # noqa: E731  (тех.менеджерлер тізімінде бар)
+COORD = lambda: U(2, "Бақыт Аружан | ГЕО", "aruzhanbakyt")  # noqa: E731
+EXTSELL = lambda: U(3, "Айтикова Аружан | сату")  # noqa: E731
+
+
+def M(user, where, text=None, caption=None, reply=None, group=None, ctype="text"):
+    _mid[0] += 1
+    chat, thread = where
+    rt = NS(message_id=reply, forum_topic_created=None) if reply else None
+    return NS(text=text, caption=caption, content_type=ctype, media_group_id=group, chat=NS(id=chat),
+              message_id=_mid[0], message_thread_id=thread, is_topic_message=True, from_user=user,
+              reply_to_message=rt)
+
+
+def complaint_text(student="Айдана Нұрлан", subject="SMART ГЕО-31", title="Кеш жауап беру", desc="Куратор жауап бермейді"):
+    return (f"Оқушы аты-жөні: {student}\nТелефон нөмірі: 87001112233\nПочта: a@b.kz\nПәні және потогы: {subject}\n"
+            f"Қызметкердің аты-жөні: Есболқызы Арай\nҚызметі/Мәселе иесі: Куратор\nМәселе атауы/типі: {title}\n"
+            f"Мәселенің толық сипаттамасы: {desc}")
+
+
+def resolution_text(student="Айдана Нұрлан", just="Негізделген", sat="Иә", stay="Иә"):
+    return (f"Оқушы аты-жөні: {student}\nМәселенің шешімі: Оқушымен байланысқа шықтық, себебі анықталды, "
+            f"кураторға ескерту жасалды.\nМәселе шындыққа негізделген бе? {just}\nОқушы риза ма? {sat}\n"
+            f"Оқушы курста қалды ма? {stay}")
+
+
+def C():
+    return db.q("SELECT * FROM complaints ORDER BY id")
+
+
+def post(e, user, where, text, **kw):
+    msg = M(user, where, text=text, **kw)
+    run(bm.handle(msg, e.bot, False))
+    return msg
+
+
+# ===================================================================== жұмыс терезесі
+@pytest.mark.parametrize("args,expected", [
+    ((2026, 10, 14, 10, 59), False), ((2026, 10, 14, 11, 0), True), ((2026, 10, 14, 20, 59), True),
+    ((2026, 10, 14, 21, 0), False), ((2026, 10, 17, 15, 0), True),   # сенбі - жұмыс күні
+    ((2026, 10, 18, 15, 0), False),                                  # жексенбі - демалыс
+])
+def test_work_window(args, expected):
+    y, m, d, h, mi = args
+    assert REAL_WINDOW(datetime(y, m, d, h, mi, tzinfo=config.TZ)) is expected
+
+
+# ===================================================================== негізгі ағын
+def test_direct_flow_end_to_end(env):
+    tech = TECH()
+    m = post(env, tech, SMART, complaint_text())
+    c = C()
+    assert len(c) == 1 and c[0]["status"] == "open" and c[0]["program"] == "smart"
+    assert c[0]["author_role"] == "tech"                       # аты тізімнен танылды
+    notify = env.bot.sent[0]
+    assert notify.reply_to == m.message_id and (notify.chat, notify.thread) == SMART
+    for tag in ("@zhhaniya", "@aruzhanbakyt", "@SdlyAmina", "@Meyrambekovich"):
+        assert tag in notify.text
+    assert env.bot.reactions                                   # 👀
+
+    # бір сағаттан кейін еске салу
+    env.clock.add(minutes=59); run(service.flush(env.bot)); assert len(env.bot.sent) == 1
+    env.clock.add(minutes=2); run(service.flush(env.bot)); assert len(env.bot.sent) == 2
+    assert "Еске салу" in env.bot.sent[1].text and "@zhhaniya" in env.bot.sent[1].text
+
+    # координатор reply ішінде шешім береді
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)
+    c = C()[0]
+    assert c["status"] == "resolved"
+    assert json.loads(c["final"])["satisfied"] == "Иә"
+    assert "шешілді" in env.bot.sent[-1].text
+    n = len(env.bot.sent)
+    env.clock.add(hours=3); run(service.flush(env.bot)); assert len(env.bot.sent) == n   # еске салу тоқтады
+
+    xl = __import__("openpyxl").load_workbook(io.BytesIO(exporter.build()))["ТЕХ МЕНЕДЖЕР"]
+    row = [x.value for x in xl[2]]
+    assert row[1] == "Айдана Нұрлан" and row[4] == "Куратор" and row[5] == "Кеш жауап беру"
+    assert row[8] == "Негізделген" and row[10] == "Бекарыс Алишер" and row[11] == "Иә" and row[12] is True
+
+
+def test_reply_to_bot_message_also_resolves(env):
+    post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    post(env, COORD(), SMART, resolution_text(), reply=notify.id)
+    assert C()[0]["status"] == "resolved"
+
+
+# ===================================================================== жұмыс уақыты / SLA
+def test_night_complaint_is_silent_then_sla_starts_when_team_is_notified(env):
+    env.clock.set(2026, 10, 17, 22, 30)                       # сенбі түн
+    post(env, TECH(), SMART, complaint_text())
+    assert env.bot.sent == [] and C()[0]["status"] == "new"
+    env.clock.set(2026, 10, 18, 14, 0); run(service.flush(env.bot))   # жексенбі
+    assert env.bot.sent == []
+    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))   # дүйсенбі 11:00
+    assert len(env.bot.sent) == 1
+    assert "20.10 11:00" in env.bot.sent[0].text, env.bot.sent[0].text   # 24 сағат хабарланған сәттен
+    assert "МЕРЗІМ ӨТТІ" not in env.bot.sent[0].text
+
+
+def test_reminders_hourly_only_in_window_and_overdue_marker(env):
+    post(env, TECH(), SMART, complaint_text())                # сәрсенбі 12:00
+    for _ in range(9):                                        # 13:00 ... 21:00 дейін
+        env.clock.add(hours=1)
+        run(service.flush(env.bot))
+    # 13..20 = 8 еске салу, 21:00-де терезе жабық
+    assert len([t for t in env.bot.texts() if "Еске салу" in t]) == 8
+    before = len(env.bot.sent)
+    env.clock.set(2026, 10, 15, 3, 0); run(service.flush(env.bot)); assert len(env.bot.sent) == before
+    env.clock.set(2026, 10, 15, 12, 30); run(service.flush(env.bot))
+    assert "МЕРЗІМ ӨТТІ" in env.bot.sent[-1].text
+
+
+def test_sunday_nothing_is_sent_and_monday_gets_one_reminder_not_flood(env):
+    post(env, TECH(), SMART, complaint_text())
+    env.clock.set(2026, 10, 18, 12, 0)
+    for _ in range(5):
+        env.clock.add(hours=1); run(service.flush(env.bot))
+    n = len(env.bot.sent)
+    assert n == 1
+    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot)); run(service.flush(env.bot))
+    assert len(env.bot.sent) == n + 1
+
+
+# ===================================================================== шаблон тексеру
+def test_invalid_complaint_gets_error_then_edit_registers_it(env):
+    bad = complaint_text(subject="SMART ГЕО")                 # ағын жоқ
+    msg = post(env, TECH(), SMART, bad)
+    assert C() == [] and "ағын жоқ" in env.bot.sent[0].text
+    msg.text = complaint_text()
+    run(bm.handle(msg, env.bot, True))
+    assert len(C()) == 1 and C()[0]["status"] == "open"
+
+
+def test_stale_error_notice_cancelled_when_fixed_before_it_was_sent(env):
+    env.clock.set(2026, 10, 18, 12, 0)                        # жексенбі: хабарлама кезекте
+    msg = post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))
+    msg.text = complaint_text()
+    run(bm.handle(msg, env.bot, True))
+    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))
+    assert not any("түзету керек" in t for t in env.bot.texts())
+    assert len(C()) == 1
+
+
+def test_screenshot_without_text_prompts_template(env):
+    post(env, TECH(), SMART, None, ctype="photo")
+    assert "мәтінсіз" in env.bot.sent[0].text and C() == []
+
+
+def test_chat_noise_is_ignored(env):
+    post(env, TECH(), SMART, "рахмет")
+    post(env, TECH(), SMART, "Қайырлы күн, бүгін сабақ қай уақытта басталады екен деп сұрап жатыр, кім біледі?" * 1)
+    assert C() == []
+    assert len(env.bot.sent) == 1 and "шаблонсыз" in env.bot.sent[0].text   # тек ұзынына ескерту
+
+
+def test_roster_member_message_is_not_a_complaint(env):
+    post(env, COORD(), SMART, complaint_text())
+    assert C() == []
+
+
+def test_program_mismatch_in_topic_is_rejected(env):
+    post(env, TECH(), JUNIOR, complaint_text(subject="SMART ГЕО-31"))
+    assert C() == [] and "SMART" in env.bot.sent[0].text and "JUNIOR" in env.bot.sent[0].text
+
+
+def test_duplicate_open_complaint_not_created_twice(env):
+    t = TECH()
+    post(env, t, SMART, complaint_text())
+    post(env, t, SMART, complaint_text())
+    assert len(C()) == 1
+
+
+# ===================================================================== кім шеше алады
+def test_author_cannot_close_own_complaint(env):
+    tech = TECH()
+    m = post(env, tech, SMART, complaint_text())
+    post(env, tech, SMART, resolution_text(), reply=m.message_id)
+    assert C()[0]["status"] == "open"
+
+
+def test_other_tech_manager_cannot_close(env):
+    m = post(env, TECH(), SMART, complaint_text())
+    other = U(11, "Куанов Али | қолдау")
+    post(env, other, SMART, resolution_text(), reply=m.message_id)
+    assert C()[0]["status"] == "open"
+
+
+def test_resolution_validation_errors_keep_complaint_open_and_edit_fixes(env):
+    m = post(env, TECH(), SMART, complaint_text())
+    r = post(env, COORD(), SMART, resolution_text(sat="мүмкін"), reply=m.message_id)
+    assert C()[0]["status"] == "open" and "Оқушы риза ма" in env.bot.sent[-1].text
+    r.text = resolution_text()
+    run(bm.handle(r, env.bot, True))
+    assert C()[0]["status"] == "resolved"
+
+
+def test_vague_solution_rejected_by_ai_check(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "check_solution",
+                        AsyncMock(return_value={"ok": False, "reason": "нақты емес"}))
+    m = post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)
+    assert C()[0]["status"] == "open" and "нақты емес" in env.bot.sent[-1].text
+
+
+# ===================================================================== reply-сыз шешім
+def test_loose_resolution_single_match_closes(env):
+    post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text())
+    assert C()[0]["status"] == "resolved"
+
+
+def test_loose_resolution_multiple_matches_asks_and_pick_closes(env):
+    post(env, TECH(), SMART, complaint_text(student="Айдана Нұрлан"))
+    post(env, TECH(), SMART, complaint_text(student="Айдана Сәрсен", subject="SMART БИО-11", desc="басқа мәселе"))
+    post(env, COORD(), SMART, resolution_text(student="Айдана Нұрлан").replace("Айдана Нұрлан", "Айдана"))
+    q = env.bot.sent[-1]
+    assert "Бірнеше" in q.text
+    cb = q.kb.inline_keyboard[0][0].callback_data
+    pid, cid = cb.split(":")[1:]
+    msg = run(service.finish_pending(env.bot, int(pid), int(cid)))
+    assert "шешілді" in msg and [c["status"] for c in C()].count("resolved") == 1
+
+
+def test_loose_resolution_unknown_student(env):
+    post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(student="Бейтаныс Адам"))
+    assert C()[0]["status"] == "open" and "табылмады" in env.bot.sent[-1].text
+
+
+# ===================================================================== сыртқы сату
+def test_external_flow_forward_and_echo(env):
+    ext = EXTSELL()
+    src = post(env, ext, EXT, complaint_text())
+    c = C()[0]
+    assert c["source"] == "external" and c["status"] == "open" and c["program"] == "smart"
+    assert env.bot.copied == [(SMART[0], [src.message_id])]
+    assert (env.bot.sent[0].chat, env.bot.sent[0].thread) == SMART
+    copied_id = c["target_msg"]
+    post(env, COORD(), SMART, resolution_text(), reply=copied_id)
+    assert C()[0]["status"] == "resolved"
+    dests = [(m.chat, m.thread) for m in env.bot.sent if "шешілді" in m.text]
+    assert dests == [SMART, EXT]                               # екі жаққа да жауап
+    assert env.bot.sent[-1].reply_to == src.message_id
+    xl = __import__("openpyxl").load_workbook(io.BytesIO(exporter.build()))
+    assert "СЫРТҚЫ САТУ" in xl.sheetnames and xl["СЫРТҚЫ САТУ"][2][11].value == "Айтикова Аружан"
+
+
+def test_external_without_program_asks_buttons_and_pick_routes(env):
+    ext = EXTSELL()
+    post(env, ext, EXT, complaint_text(subject="ГЕО-31"))
+    c = C()[0]
+    assert c["status"] == "awaiting_program"
+    assert "SMART/JUNIOR" in env.bot.sent[0].text
+    tgt = db.binding("smart_hate")
+    parsed = json.loads(c["parsed"])
+    coords, sups, notes = service.compute_responsible("smart", parsed)
+    db.update("complaints", c["id"], program="smart", status="new", last_reminder_at=None, target_chat=tgt["chat_id"],
+              target_thread=tgt["thread_id"], responsible=service.resp_json(coords, sups), notes="")
+    run(service.flush(env.bot))
+    assert C()[0]["status"] == "open" and env.bot.copied
+
+
+def test_junior_routing(env):
+    post(env, TECH(), JUNIOR, complaint_text(subject="JUNIOR МАТ"))
+    t = env.bot.sent[0].text
+    assert "@arystanbekova7" in t and "@maqzhan1" in t and "@bayashkarr" not in t
+    post(env, TECH(), JUNIOR, complaint_text(student="Басқа Оқушы", subject="JUNIOR БИО", desc="x"))
+    t = env.bot.sent[1].text
+    assert "@bayashkarr" in t and "@nurlnvash" in t and "@maqzhan1" in t
+
+
+# ===================================================================== сенімділік
+def test_concurrent_flush_does_not_duplicate_messages(env):
+    tech = TECH()
+    msg = M(tech, SMART, text=complaint_text())
+    db.x("INSERT INTO complaints(status,source,src_chat,src_thread,src_msg,author_id,author_name,author_role,program,"
+         "target_chat,target_thread,target_msg,text,parsed,responsible,created_at) VALUES('new','direct',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         SMART[0], SMART[1], msg.message_id, 1, "x", "tech", "smart", SMART[0], SMART[1], msg.message_id, "t",
+         json.dumps(T.validate_complaint(complaint_text())[0]), json.dumps({}), env.clock.now().isoformat())
+
+    async def both():
+        await asyncio.gather(service.flush(env.bot), service.flush(env.bot), service.flush(env.bot))
+    run(both())
+    assert len([t for t in env.bot.texts() if "Жаңа шағым" in t]) == 1
+
+
+def test_echo_failure_does_not_repeat_target_notice(env):
+    post(env, EXTSELL(), EXT, complaint_text())
+    c = C()[0]
+    env.bot.fail_chat = EXT[0]                                 # сыртқы топқа жазу сәтсіз
+    post(env, COORD(), SMART, resolution_text(), reply=c["target_msg"])
+    for _ in range(3):
+        env.clock.add(seconds=20); run(service.flush(env.bot))
+    assert len([m for m in env.bot.sent if m.chat == SMART[0] and "шешілді" in m.text]) == 1
+
+
+def test_dispatch_failure_after_copy_does_not_copy_again(env):
+    env.bot.fail_chat = SMART[0]                               # notify жіберу сәтсіз, copy сәтті
+    post(env, EXTSELL(), EXT, complaint_text())
+    env.bot.fail_chat = None
+    for _ in range(3):
+        env.clock.add(minutes=6); run(service.flush(env.bot))
+    assert len(env.bot.copied) == 1
+
+
+def test_excel_formula_injection_is_neutralised(env):
+    m = post(env, TECH(), SMART, complaint_text(desc="=HYPERLINK(\"http://evil\",\"x\")"))
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)
+    ws = __import__("openpyxl").load_workbook(io.BytesIO(exporter.build()))["ТЕХ МЕНЕДЖЕР"]
+    cell = ws[2][6]
+    assert cell.data_type != "f"
+
+
+# ===================================================================== пән талдау
+@pytest.mark.parametrize("label,program,pairs", [
+    ("SMART ГЕО-31", "smart", [("ГЕО", "31")]),
+    ("SMART ФИЗ, МАТ-01", "smart", [("ФИЗ", "01"), ("МАТ", "01")]),
+    ("SMART ДЖТ-11, АНГЛ-11, МС-71, Т-71", "smart", [("ДЖТ", "11"), ("АНГЛ", "11"), ("МС", "71"), ("ТАРИХ", "71")]),
+    ("JUNIOR БИО", "junior", [("БИО", None)]),
+    ("SMART Орыс тілі-21", "smart", [("РУСЛИТ", "21")]),
+    ("SMART Ағылшын тілі-01", "smart", [("АНГЛ", "01")]),
+    ("SMART Қазақстан тарихы-31", "smart", [("ТАРИХ", "31")]),
+])
+def test_subject_parsing(label, program, pairs):
+    p, got = T.parse_subject(label)
+    assert p == program and got == pairs
