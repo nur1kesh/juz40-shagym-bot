@@ -36,10 +36,8 @@ RESOLUTION_LABELS = {
 COMPLAINT_TEMPLATE = """Оқушы аты-жөні:
 Телефон нөмірі:
 Почта:
-Пәні және потогы: SMART ГЕО-31
+Пәні және потогы:
 Қызметкердің аты-жөні:
-Қызметі/Мәселе иесі:
-Мәселе атауы/типі:
 Мәселенің толық сипаттамасы: """
 
 RESOLUTION_TEMPLATE = """Оқушы аты-жөні:
@@ -48,13 +46,7 @@ RESOLUTION_TEMPLATE = """Оқушы аты-жөні:
 Оқушы риза ма?
 Оқушы курста қалды ма? """
 
-COMPLAINT_HELP = (
-    "📝 <b>Шағым шаблоны</b>\n<code>" + COMPLAINT_TEMPLATE + "</code>\n"
-    "<blockquote expandable><b>Қызметі:</b> " + " / ".join(ROLES) + "\n"
-    "<b>Мәселе типі:</b> " + " / ".join(ISSUE_TYPES) + "\n"
-    "<b>Пән:</b> <code>SMART ГЕО-31</code>, бірнеше: <code>SMART ФИЗ, МАТ-01</code>, "
-    "JUNIOR: <code>JUNIOR БИО</code>\n"
-    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>")
+COMPLAINT_HELP = "📝 <b>Шағым шаблоны</b>\n<code>" + COMPLAINT_TEMPLATE + "</code>"
 
 RESOLUTION_HELP = (
     "📝 <b>Шешім шаблоны</b> (шағымға reply)\n<code>" + RESOLUTION_TEMPLATE + "</code>\n"
@@ -151,9 +143,8 @@ def parse_subject(label: str):
 
 # ------------------------------------------------------------------ шағымды тексеру
 URL_RE = re.compile(r"https?://\S+|t\.me/\S+", re.I)
-REQUIRED_C = {"student": "Оқушы аты-жөні", "subject": "Пәні және потогы", "employee": "Қызметкердің аты-жөні",
-              "role": "Қызметі/Мәселе иесі", "title": "Мәселе атауы/типі",
-              "desc": "Мәселенің толық сипаттамасы"}
+REQUIRED_C = {"student": "Оқушы аты-жөні", "subject": "Пәні және потогы",
+              "desc": "Мәселенің толық сипаттамасы"}  # қызметі, мәселе типі, қызметкер - міндетті емес (OpenAI толтырады)
 
 
 def validate_complaint(text: str):
@@ -163,12 +154,9 @@ def validate_complaint(text: str):
     for k, label in REQUIRED_C.items():
         if not f.get(k, "").strip():
             errors.append(f"«{label}» толтырылмаған")
+    # қолмен жазылса және тізімге сәйкес болса - қолданамыз, әйтпесе OpenAI таңдайды (қате емес)
     role = match_enum(f.get("role", ""), ROLES) if f.get("role") else None
-    if f.get("role") and not role:
-        errors.append("«Қызметі»: тізімнен таңдаңыз (/shablon)")
     title = match_enum(f.get("title", ""), ISSUE_TYPES) if f.get("title") else None
-    if f.get("title") and not title:
-        errors.append("«Мәселе типі»: тізімнен таңдаңыз (/shablon)")
     program, pairs = parse_subject(f.get("subject", ""))
     if f.get("subject"):
         if not pairs:
@@ -181,7 +169,7 @@ def validate_complaint(text: str):
         "student_name": f["student"], "phone": f.get("phone") or "", "email": f.get("email") or "",
         "program": program, "pairs": [list(p) for p in pairs],
         "subjects": [s for s, _ in pairs], "stream": next((st for _, st in pairs if st), None),
-        "subject_label": f["subject"].strip(), "employee_name": f["employee"],
+        "subject_label": f["subject"].strip(), "employee_name": (f.get("employee") or "").strip() or None,
         "employee_role": role, "issue_title": title, "description": f["desc"],
         "chat_link": (URL_RE.search(text).group(0) if URL_RE.search(text) else None),
         "mentioned_usernames": re.findall(r"@(\w{4,})", text),

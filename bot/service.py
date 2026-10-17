@@ -187,6 +187,17 @@ def _warn_pending_albums():
 
 
 # ---------------------------------------------------------------- шағым қабылдау
+async def _fill_auto(parsed: dict) -> dict:
+    """Қызметі / мәселе типі / қызметкер аты бос болса, OpenAI мәтін бойынша толтырады."""
+    if parsed.get("employee_role") and parsed.get("issue_title") and parsed.get("employee_name"):
+        return parsed
+    cls = await ai.classify(parsed["description"])
+    parsed["employee_role"] = parsed.get("employee_role") or cls["role"]
+    parsed["issue_title"] = parsed.get("issue_title") or cls["title"]
+    parsed["employee_name"] = parsed.get("employee_name") or cls["employee_name"] or "-"
+    return parsed
+
+
 async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     text = msg.text or msg.caption
     if not text:
@@ -225,6 +236,7 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
             await flush(bot)
             return
     await clear_notices(bot, key)
+    parsed = await _fill_auto(parsed)
     if program:
         coords, sups, notes = compute_responsible(program, parsed)
         resp, note = resp_json(coords, sups), "; ".join(notes)

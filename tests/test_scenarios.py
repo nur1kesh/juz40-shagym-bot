@@ -17,6 +17,8 @@ from bot import config, db, exporter, service, templates as T  # noqa: E402
 import bot.main as bm  # noqa: E402
 
 REAL_WINDOW = config.in_work_window
+from bot import ai as _ai_mod  # noqa: E402
+REAL_CLASSIFY = _ai_mod.classify
 SMART, JUNIOR, EXT = (-100, 5), (-100, 6), (-200, 9)
 
 
@@ -85,6 +87,8 @@ def env(monkeypatch):
     monkeypatch.setattr(service, "now", clock.now)
     monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
     monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
+    monkeypatch.setattr(service.ai, "classify", AsyncMock(
+        return_value={"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Есболқызы Арай"}))
     return NS(clock=clock, bot=FakeBot())
 
 
@@ -470,3 +474,63 @@ def test_resolved_notice_short_in_topic_full_echo_for_external(env):
     echo_msg = [m for m in env.bot.sent if m.chat == EXT[0] and "шешілді" in m.text][0]
     assert len(topic_msg.text) < 80 and "Оқушымен байланысқа" not in topic_msg.text
     assert "Оқушымен байланысқа" in echo_msg.text
+
+
+# ===================================================================== автоматты іріктеу (OpenAI)
+def minimal_text(student="Айдана Нұрлан", subject="SMART ГЕО-31", desc="Куратор Арай 3 күн жауап бермейді"):
+    return (f"Оқушы аты-жөні: {student}\nПәні және потогы: {subject}\n"
+            f"Мәселенің толық сипаттамасы: {desc}")
+
+
+def test_template_has_no_prefill_and_no_option_lists():
+    assert "SMART ГЕО-31" not in T.COMPLAINT_TEMPLATE and "SMART ГЕО-31" not in T.COMPLAINT_HELP
+    assert "Қызметі" not in T.COMPLAINT_HELP and "Мәселе типі" not in T.COMPLAINT_HELP
+    assert "blockquote" not in T.COMPLAINT_HELP
+
+
+def test_minimal_complaint_gets_role_title_employee_from_ai(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify", AsyncMock(
+        return_value={"role": "Мұғалім", "title": "Мұғалім мәселесі", "employee_name": "Асан Бекұлы"}))
+    post(env, TECH(), SMART, minimal_text())
+    p = json.loads(C()[0]["parsed"])
+    assert (p["employee_role"], p["issue_title"], p["employee_name"]) == ("Мұғалім", "Мұғалім мәселесі", "Асан Бекұлы")
+    assert "Мұғалім мәселесі" in env.bot.sent[0].text
+
+
+def test_manual_values_are_kept_and_ai_not_called(env, monkeypatch):
+    spy = AsyncMock(return_value={"role": "Курс", "title": "Курс системасы", "employee_name": "X"})
+    monkeypatch.setattr(service.ai, "classify", spy)
+    post(env, TECH(), SMART, complaint_text())          # қызметі/типі/қызметкер қолмен жазылған
+    p = json.loads(C()[0]["parsed"])
+    assert (p["employee_role"], p["issue_title"], p["employee_name"]) == ("Куратор", "Кеш жауап беру", "Есболқызы Арай")
+    spy.assert_not_awaited()
+
+
+def test_invalid_manual_role_is_not_an_error_ai_decides(env):
+    text = complaint_text().replace("Қызметі/Мәселе иесі: Куратор", "Қызметі/Мәселе иесі: ойдан шығарылған")
+    post(env, TECH(), SMART, text)
+    assert len(C()) == 1 and json.loads(C()[0]["parsed"])["employee_role"] == "Куратор"   # AI (mock) таңдады
+
+
+def test_classify_validates_ai_output_and_falls_back_to_dash(monkeypatch):
+    from bot import ai
+
+    def resp(content):
+        return NS(choices=[NS(message=NS(content=content))])
+    good = AsyncMock(return_value=resp(json.dumps({"role": "куратор", "title": "кеш жауап беру", "employee_name": "Арай"})))
+    monkeypatch.setattr(ai.client.chat.completions, "create", good)
+    assert run(REAL_CLASSIFY("текст")) == {"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Арай"}
+    junk = AsyncMock(return_value=resp(json.dumps({"role": "жоқ тізімде", "title": "бірдеңе", "employee_name": "null"})))
+    monkeypatch.setattr(ai.client.chat.completions, "create", junk)
+    assert run(REAL_CLASSIFY("текст")) == {"role": "-", "title": "-", "employee_name": None}
+    monkeypatch.setattr(ai.client.chat.completions, "create", AsyncMock(side_effect=RuntimeError("down")))
+    assert run(REAL_CLASSIFY("текст"))["role"] == "-"
+
+
+def test_ai_failure_does_not_block_complaint(env, monkeypatch):
+    from bot import ai
+    monkeypatch.setattr(service.ai, "classify", REAL_CLASSIFY)
+    monkeypatch.setattr(ai.client.chat.completions, "create", AsyncMock(side_effect=RuntimeError("down")))
+    post(env, TECH(), SMART, minimal_text())
+    p = json.loads(C()[0]["parsed"])
+    assert C()[0]["status"] == "open" and p["employee_role"] == "-" and p["issue_title"] == "-"
