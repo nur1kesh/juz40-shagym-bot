@@ -750,3 +750,71 @@ def test_progress_reply_to_the_reminder_message_itself(env):
     assert env.bot.reactions[-1][2][0].emoji == "✍"
     env.clock.add(hours=1); run(service.flush(env.bot))
     assert "Процессте" in env.bot.sent[-1].text and "Оразова Анеля" in env.bot.sent[-1].text
+
+
+# ===================================================================== /open
+def test_open_list_is_detailed_and_does_not_ping(env):
+    post(env, TECH(), SMART, complaint_text(student="Жансая Абил", subject="SMART ДЖТ-31"))
+    post(env, EXTSELL(), EXT, complaint_text(student="Айдос Нұрлан", subject="SMART ГЕО-21", desc="басқа"))
+    notify = env.bot.sent[0]
+    post(env, COORD(), SMART, "процессте", reply=notify.id)
+    env.clock.add(hours=2)
+    text = "\n".join(service.fmt_open_list())
+    for part in ("Ашық шағымдар (2)", "Жансая Абил", "Айдос Нұрлан", "ДЖТ-31", "Кеш жауап беру", "Есболқызы Арай",
+                 "2 сағ", "дедлайн", "процессте", "Бекарыс Алишер", "Айтикова Аружан"):
+        assert part in text, part
+    assert "@" not in text                                   # атаулар @-сыз: қоңырау шалмайды
+    assert 'href="https://t.me/c/' in text or "t.me/c/" in text
+
+
+def test_open_list_flags_overdue_and_pending_states(env):
+    post(env, TECH(), SMART, complaint_text())
+    env.clock.add(hours=30)
+    assert "дедлайн өтті" in service.fmt_open_list()[0] and "🚨" in service.fmt_open_list()[0]
+    env.clock.set(2026, 10, 17, 22, 0)                      # сенбі түн: жаңа шағым кезекте
+    post(env, TECH(), SMART, complaint_text(student="Түнгі Оқушы", desc="түнде"))
+    assert "жұмыс уақытын күтіп" in "\n".join(service.fmt_open_list())
+
+
+def test_open_list_is_split_into_telegram_sized_chunks(env):
+    for i in range(40):
+        post(env, TECH(), SMART, complaint_text(student=f"Оқушы Нөмір{i}", desc=f"мәселе {i} " + "көп мәтін " * 5))
+    chunks = service.fmt_open_list()
+    assert len(chunks) >= 2 and all(len(c) < 4096 for c in chunks)
+    assert sum(c.count("Оқушы Нөмір") for c in chunks) == 40
+
+
+def test_open_in_group_shows_only_that_topic_and_expires(env):
+    post(env, TECH(), SMART, complaint_text(student="Смарт Оқушы"))
+    post(env, TECH(), JUNIOR, complaint_text(student="Джуниор Оқушы", subject="JUNIOR БИО", desc="басқа"))
+    out = []
+
+    async def answer(text, **kw):
+        env.bot._id += 1
+        out.append(text)
+        return NS(message_id=env.bot._id, chat=NS(id=SMART[0]))
+    msg = NS(chat=NS(id=SMART[0], type="supergroup"), message_thread_id=SMART[1], is_topic_message=True,
+             from_user=NS(id=1), answer=answer)
+    run(bm.cmd_open(msg, env.bot))
+    assert "Смарт Оқушы" in out[0] and "Джуниор Оқушы" not in out[0]
+    assert db.q1("SELECT COUNT(*) n FROM ephemeral")["n"] == 1
+
+
+def test_open_in_private_needs_admin(env):
+    class AdminBot(FakeBot):
+        def __init__(self, admin):
+            super().__init__()
+            self.admin = admin
+
+        async def get_chat_member(self, chat_id, user_id):
+            return NS(status="administrator" if self.admin else "member")
+    post(env, TECH(), SMART, complaint_text())
+    for admin, expected in ((False, "админдеріне"), (True, "Ашық шағымдар")):
+        out = []
+
+        async def answer(text, **kw):
+            out.append(text)
+            return NS(message_id=1, chat=NS(id=1))
+        msg = NS(chat=NS(id=1, type="private"), from_user=NS(id=9), answer=answer)
+        run(bm.cmd_open(msg, AdminBot(admin)))
+        assert expected in out[0]

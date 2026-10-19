@@ -649,13 +649,62 @@ async def _notify_resolved(bot: Bot, c):
         await send(bot, c["src_chat"], c["src_thread"], echo, c["id"], reply_to=c["src_msg"])
 
 
-def fmt_open_list() -> str:
+def _open_rows(chat_id: int | None = None, thread_id: int | None = None, external_src: bool = False):
     rows = db.q("SELECT * FROM complaints WHERE status IN ('open','new','awaiting_program') ORDER BY id")
+    if chat_id is None:
+        return rows
+    if external_src:
+        return [c for c in rows if c["source"] == "external" and c["src_chat"] == chat_id and c["src_thread"] == thread_id]
+    return [c for c in rows if c["target_chat"] == chat_id and c["target_thread"] == thread_id]
+
+
+def _status_line(c, t: datetime) -> str:
+    if c["status"] == "awaiting_program":
+        return "❓ SMART/JUNIOR таңдалмаған"
+    if c["status"] == "new":
+        return "🕒 жұмыс уақытын күтіп тұр"
+    hrs = int((t - sla_start(c)).total_seconds() // 3600)
+    over = t - sla_start(c) > timedelta(hours=SLA_HOURS)
+    flag = "🚨 дедлайн өтті" if over else f"дедлайн {deadline(c):%d.%m %H:%M}"
+    prog = ""
+    if c["progress_at"]:
+        prog = f" · 🔄 процессте ({html.escape((c['progress_by'] or '').split('|')[0].strip())}, {parse_dt(c['progress_at']):%H:%M})"
+    return f"🕒 {hrs} сағ · {flag}{prog}"
+
+
+def _open_item(c, t: datetime) -> str:
+    p = json.loads(c["parsed"] or "{}")
+    resp = json.loads(c["responsible"] or "{}")
+    names = [d["name"] for d in resp.get("coords", []) + resp.get("sups", [])]
+    people_line = ", ".join(html.escape(n) for n in names[:4]) + (f" +{len(names) - 4}" if len(names) > 4 else "")
+    title = f'<a href="{msg_link(c)}">#{c["id"]}</a>' if c["target_msg"] else f"#{c['id']}"
+    about = " · ".join(x for x in (p.get("issue_title"), p.get("employee_role")) if x and x != "-")
+    emp = p.get("employee_name")
+    lines = [f"{title} · <b>{html.escape(p.get('student_name') or '-')}</b> · {label(c, with_issue=False)}"]
+    if about or (emp and emp != "-"):
+        lines.append("📌 " + html.escape(about) + (f": {html.escape(emp)}" if emp and emp != "-" else ""))
+    lines.append(_status_line(c, t))
+    lines.append(f"✍ {html.escape((c['author_name'] or '-').split('|')[0].strip())}"
+                 + (f" · 👥 {people_line}" if people_line else ""))
+    return "\n".join(lines)
+
+
+def fmt_open_list(chat_id: int | None = None, thread_id: int | None = None, external_src: bool = False) -> list[str]:
+    """Ашық шағымдардың толық тізімі (Telegram лимитіне қарай бөліктерге бөлінеді). Атаулар @-сыз: ешкімді қоңыраулатпайды."""
+    rows = _open_rows(chat_id, thread_id, external_src)
     if not rows:
-        return "Ашық шағым жоқ ✅"
+        return ["Ашық шағым жоқ ✅"]
     t = now()
-    out = []
+    over = sum(1 for c in rows if c["status"] == "open" and t - sla_start(c) > timedelta(hours=SLA_HOURS))
+    prog = sum(1 for c in rows if c["progress_at"])
+    head = f"📋 <b>Ашық шағымдар ({len(rows)})</b>" + (f" · 🚨 {over}" if over else "") + (f" · 🔄 {prog}" if prog else "")
+    chunks, cur = [], head
     for c in rows:
-        age = int((t - parse_dt(c["created_at"])).total_seconds() // 3600)
-        out.append(f"#{c['id']} · {label(c)} — {age} сағ")
-    return "\n".join(out)
+        item = _open_item(c, t)
+        if len(cur) + len(item) + 2 > 3800:
+            chunks.append(cur)
+            cur = item
+        else:
+            cur += "\n\n" + item
+    chunks.append(cur)
+    return chunks

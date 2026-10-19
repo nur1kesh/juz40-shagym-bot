@@ -43,7 +43,7 @@ async def cmd_help(msg: Message):
         "/shablon — шағым шаблоны (админ: /shablon pin)\n"
         "/shesim — шешім шаблоны (админ: /shesim pin)\n"
         "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
-        "/open — ашық шағымдар\n"
+        "/open — ашық шағымдар (топта: осы topic; админге жеке чатта: барлығы)\n"
         "/close ID — шағымды қолмен жабу (админ)\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
         "/setrole tech|internal — қызметкердің хабарламасына reply етіп рөлін көрсету (админ)\n"
@@ -106,8 +106,23 @@ async def cmd_bindings(msg: Message):
 
 
 @dp.message(Command("open"))
-async def cmd_open(msg: Message):
-    await msg.reply(service.fmt_open_list(), parse_mode="HTML")
+async def cmd_open(msg: Message, bot: Bot):
+    """Жеке чатта (админ): барлық ашық шағым. Топта: тек осы topic-тің шағымдары, 10 минуттан кейін өшеді."""
+    if msg.chat.type == "private":
+        if not await is_admin_anywhere(bot, msg.from_user.id):
+            return await msg.answer("Тек байланған топтардың админдеріне қолжетімді.")
+        chunks = service.fmt_open_list()
+        ttl = None
+    else:
+        role = db.role_of(msg.chat.id, thread_of(msg))
+        if not role:
+            return
+        chunks = service.fmt_open_list(msg.chat.id, thread_of(msg), external_src=(role == "external_hate"))
+        ttl = 10
+    for text in chunks:
+        m = await msg.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+        if ttl:
+            service.track_ephemeral(m.chat.id, m.message_id, ttl)
 
 
 @dp.message(Command("close"))
