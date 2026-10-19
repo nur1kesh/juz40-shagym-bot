@@ -500,8 +500,8 @@ async def _flush(bot: Bot):
 
     for c in db.q("SELECT * FROM complaints WHERE status='awaiting_program'"):
         last = c["last_reminder_at"]
-        if last and (not window or t - parse_dt(last) < timedelta(minutes=REMINDER_EVERY_MIN)):
-            continue  # бірінші сұрақ бірден; қайталануы - еске салу, тек жұмыс уақытында
+        if last and t - parse_dt(last) < timedelta(minutes=REMINDER_EVERY_MIN):
+            continue  # сұрақ сағатына бір рет қайталанады, кез келген уақытта (жұмыс уақыты тек шағымды еске салуға)
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="SMART", callback_data=f"prog:{c['id']}:smart"),

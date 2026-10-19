@@ -877,3 +877,13 @@ def test_progress_reply_to_the_forwarded_external_complaint_and_its_notification
     db.update("complaints", c["id"], progress_at=None)
     post(env, COORD(), SMART, "в процессе", reply=c["target_msg"])           # көшірілген шағымның өзіне
     assert C()[0]["progress_at"]
+
+
+def test_program_question_repeats_hourly_at_any_time(env):
+    env.clock.set(2026, 10, 18, 3, 0)                       # жексенбі түн - жұмыс уақытынан тыс
+    post(env, EXTSELL(), EXT, complaint_text(subject="ГЕО-31"))
+    q = lambda: [m for m in env.bot.sent if "SMART па" in m.text]  # noqa: E731
+    assert len(q()) == 1                                    # бірінші сұрақ бірден
+    env.clock.add(minutes=30); run(service.flush(env.bot)); assert len(q()) == 1
+    env.clock.add(minutes=31); run(service.flush(env.bot)); assert len(q()) == 2    # 1 сағаттан кейін қайталанады
+    env.clock.add(hours=1); run(service.flush(env.bot)); assert len(q()) == 3
