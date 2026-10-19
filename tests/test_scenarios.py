@@ -735,3 +735,18 @@ def test_template_without_ai_still_works_and_short_chat_never_calls_ai(env, monk
     post(env, TECH(), SMART, complaint_text())            # дұрыс шаблон: OpenAI керек емес
     post(env, TECH(), SMART, "рахмет")
     spy.assert_not_awaited()
+
+
+def test_progress_reply_to_the_reminder_message_itself(env):
+    """Шын чаттағы жағдай: координатор еске салуға (reminder) «процессте, шешіліп жатыр» деп reply жасайды."""
+    post(env, TECH(), SMART, complaint_text())
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    reminder = env.bot.sent[-1]
+    assert "Еске салу" in reminder.text
+    coord = U(5, "Оразова Анеля | дүниежүзі тарихы координаторы", "aaneleka")
+    post(env, coord, SMART, "процессте, шешіліп жатыр", reply=reminder.id)
+    c = C()[0]
+    assert c["status"] == "open" and c["progress_at"] and c["progress_by"] == "Оразова Анеля"
+    assert env.bot.reactions[-1][2][0].emoji == "✍"
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    assert "Процессте" in env.bot.sent[-1].text and "Оразова Анеля" in env.bot.sent[-1].text
