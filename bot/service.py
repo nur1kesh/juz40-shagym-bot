@@ -544,7 +544,7 @@ async def _dispatch_new(bot: Bot, c):
         db.update("complaints", c["id"], target_msg=target_msg)
     due = now() + timedelta(hours=SLA_HOURS)
     lines = [f"🔔 <b>#{c['id']}</b> · {label(c)}" + (" · сыртқы сату" if c["source"] == "external" else ""),
-             tags_inline(c), f"⏳ {due:%d.%m %H:%M}"]
+             tags_inline(c), f"⏳ Дедлайн: {due:%d.%m %H:%M}"]
     if c["notes"]:
         lines.append(f"⚠️ {html.escape(c['notes'])}")
     await send(bot, c["target_chat"], c["target_thread"], "\n".join(lines), c["id"],
@@ -572,8 +572,8 @@ def _reminder_text(c, t: datetime) -> str:
     p = json.loads(c["parsed"] or "{}")
     hrs = int((t - sla_start(c)).total_seconds() // 3600)
     over = t - sla_start(c) > timedelta(hours=SLA_HOURS)
-    head = (f"🚨 <b>Мерзім өтті</b> · #{c['id']} · {hrs} сағ" if over
-            else f"⏰ <b>Еске салу</b> · #{c['id']} · {hrs} сағ өтті (мерзім {deadline(c):%d.%m %H:%M})")
+    head = (f"🚨 <b>Дедлайн өтті</b> · #{c['id']} · {hrs} сағ" if over
+            else f"⏰ <b>Еске салу</b> · #{c['id']} · {hrs} сағ өтті (дедлайн {deadline(c):%d.%m %H:%M})")
     who = html.escape(p.get("student_name") or "-")
     lines = [head, f"👤 {who} · {label(c, with_issue=False)}"]
     about = " · ".join(x for x in (p.get("issue_title"), p.get("employee_role")) if x and x != "-")

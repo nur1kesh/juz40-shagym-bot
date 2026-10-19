@@ -199,7 +199,7 @@ def test_night_complaint_is_silent_then_sla_starts_when_team_is_notified(env):
     env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))   # дүйсенбі 11:00
     assert len(env.bot.sent) == 1
     assert "20.10 11:00" in env.bot.sent[0].text, env.bot.sent[0].text   # 24 сағат хабарланған сәттен
-    assert "Мерзім өтті" not in env.bot.sent[0].text
+    assert "Дедлайн өтті" not in env.bot.sent[0].text
 
 
 def test_reminders_hourly_only_in_window_and_overdue_marker(env):
@@ -212,7 +212,7 @@ def test_reminders_hourly_only_in_window_and_overdue_marker(env):
     before = len(env.bot.sent)
     env.clock.set(2026, 10, 15, 3, 0); run(service.flush(env.bot)); assert len(env.bot.sent) == before
     env.clock.set(2026, 10, 15, 12, 30); run(service.flush(env.bot))
-    assert "Мерзім өтті" in env.bot.sent[-1].text
+    assert "Дедлайн өтті" in env.bot.sent[-1].text
 
 
 def test_sunday_nothing_is_sent_and_monday_gets_one_reminder_not_flood(env):
@@ -595,7 +595,7 @@ def test_reminder_has_student_snippet_deadline_and_people(env):
     env.clock.add(hours=1); run(service.flush(env.bot))
     t = env.bot.sent[-1].text
     for part in ("Еске салу", "#", "1 сағ", "Жансая Абил", "Куратор жауап бермейді", "@zhhaniya", "Кеш жауап беру",
-                 "мерзім", "Жауап күтілуде"):
+                 "дедлайн", "Жауап күтілуде"):
         assert part in t, (part, t)
 
 
