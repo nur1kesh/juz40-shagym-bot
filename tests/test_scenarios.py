@@ -118,7 +118,7 @@ def M(user, where, text=None, caption=None, reply=None, group=None, ctype="text"
 
 
 def complaint_text(student="Айдана Нұрлан", subject="SMART ГЕО-31", title="Кеш жауап беру", desc="Куратор жауап бермейді"):
-    return (f"Оқушы аты-жөні: {student}\nТелефон нөмірі: 87001112233\nПочта: a@b.kz\nПәні және потогы: {subject}\n"
+    return (f"Оқушы аты-жөні: {student}\nТелефон нөмірі: 87001112233\nПәні және потогы: {subject}\n"
             f"Қызметкердің аты-жөні: Есболқызы Арай\nҚызметі/Мәселе иесі: Куратор\nМәселе атауы/типі: {title}\n"
             f"Мәселенің толық сипаттамасы: {desc}")
 
@@ -681,7 +681,7 @@ FREEFORM = """1)Айтжанова Айлин,
 3)Азатқан Толғанай
 4)куратором өзіме ұнамайды жеке себептермен
 @Meyrambekovich"""
-EXTRACTED = {"is_complaint": True, "student_name": "Айтжанова Айлин", "phone": "87054678221", "email": None,
+EXTRACTED = {"is_complaint": True, "student_name": "Айтжанова Айлин", "phone": "87054678221",
              "subject": "ГЕО-21", "employee_name": "Азатқан Толғанай",
              "description": "куратором өзіме ұнамайды жеке себептермен"}
 
@@ -700,7 +700,7 @@ def test_freeform_numbered_message_is_accepted_automatically(env, monkeypatch):
 
 def test_freeform_chat_that_is_not_a_complaint_is_silent(env, monkeypatch):
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value={
-        "is_complaint": False, "student_name": None, "phone": None, "email": None, "subject": None,
+        "is_complaint": False, "student_name": None, "phone": None, "subject": None,
         "employee_name": None, "description": None}))
     post(env, TECH(), SMART, "Қайырлы күн!\nБүгін сабақ қай уақытта басталады екен?\nКім біледі, айтыңыздаршы")
     assert C() == [] and env.bot.sent == []

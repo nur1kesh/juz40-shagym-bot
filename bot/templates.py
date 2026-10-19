@@ -18,7 +18,7 @@ SYNONYMS = {"да": "Иә", "иа": "Иә", "ия": "Иә", "yes": "Иә", "не
 COMPLAINT_LABELS = {
     "student": ["Оқушы аты-жөні", "Оқушы аты жөні"],
     "phone": ["Телефон нөмірі", "Телефон"],
-    "email": ["Почта", "Email", "E-mail"],
+    "email": ["Почта", "Email", "E-mail"],  # ескі шаблонда болған: жолды оқимыз да, елемейміз
     "subject": ["Пәні және потогы", "Пәні және потоғы", "Пән және потог"],
     "employee": ["Қызметкердің аты-жөні", "Қызметкер аты-жөні"],
     "role": ["Қызметі/Мәселе иесі", "Қызметі / Мәселе иесі", "Қызметі", "Мәселе иесі"],
@@ -35,7 +35,6 @@ RESOLUTION_LABELS = {
 
 COMPLAINT_TEMPLATE = """Оқушы аты-жөні:
 Телефон нөмірі:
-Почта:
 Пәні және потогы:
 Қызметкердің аты-жөні:
 Мәселенің толық сипаттамасы: """
@@ -164,7 +163,6 @@ def synth_complaint(labels: dict, ext: dict) -> str:
     return "\n".join([
         f"Оқушы аты-жөні: {pick('student', 'student_name')}",
         f"Телефон нөмірі: {pick('phone', 'phone')}",
-        f"Почта: {pick('email', 'email')}",
         f"Пәні және потогы: {pick('subject', 'subject')}",
         f"Қызметкердің аты-жөні: {pick('employee', 'employee_name')}",
         f"Мәселенің толық сипаттамасы: {pick('desc', 'description')}",
@@ -190,7 +188,7 @@ def validate_complaint(text: str):
     if errors:
         return None, errors, f
     parsed = {
-        "student_name": f["student"], "phone": f.get("phone") or "", "email": f.get("email") or "",
+        "student_name": f["student"], "phone": f.get("phone") or "",
         "program": program, "pairs": [list(p) for p in pairs],
         "subjects": [s for s, _ in pairs], "stream": next((st for _, st in pairs if st), None),
         "subject_label": f["subject"].strip(), "employee_name": (f.get("employee") or "").strip() or None,
