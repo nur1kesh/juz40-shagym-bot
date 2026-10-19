@@ -356,11 +356,10 @@ async def mark_progress(bot: Bot, msg, c, text: str):
     db.update("complaints", c["id"], progress_at=iso(now()), progress_by=by)
     db.x("INSERT INTO replies(complaint_id,user_id,user_name,text,kind,created_at) VALUES(?,?,?,?,?,?)",
          c["id"], msg.from_user.id, msg.from_user.full_name, text, "progress", iso(now()))
-    if in_work_window():
-        try:
-            await bot.set_message_reaction(msg.chat.id, msg.message_id, [ReactionTypeEmoji(emoji=PROGRESS_REACTION)])
-        except Exception:
-            pass
+    try:
+        await bot.set_message_reaction(msg.chat.id, msg.message_id, [ReactionTypeEmoji(emoji=PROGRESS_REACTION)])
+    except Exception:
+        pass
 
 
 async def _resolve(bot: Bot, msg, c, text: str, thread: int, key: str):
@@ -462,12 +461,11 @@ async def send(bot: Bot, chat_id, thread_id, text, cid, reply_to=None, markup=No
 
 
 async def flush(bot: Bot):
-    """Кезекте тұрғанның бәрін жібереді. Жұмыс уақытынан тыс ештеңе жазбайды.
+    """Кезекте тұрғанның бәрін жібереді. Жұмыс уақыты (Дс-Сб 11-21) тек САҒАТ САЙЫНҒЫ ЕСКЕ САЛУҒА қатысты,
+    қалғаны (қабылдау, белгілеу, көшіру, жабу, ескертулер) кез келген уақытта жұмыс істейді.
     Бір уақытта тек біреуі жұмыс істейді (handler мен ticker қосарланып жібермеуі үшін)."""
     _warn_pending_albums()
-    await _sweep_ephemeral(bot)  # өшіру - жазу емес, жұмыс уақытынан тыс та орындалады
-    if not in_work_window():
-        return
+    await _sweep_ephemeral(bot)
     lock = _locks.setdefault(id(asyncio.get_running_loop()), asyncio.Lock())
     async with lock:
         await _flush(bot)
@@ -480,6 +478,7 @@ def _recently_failed(c, t) -> bool:
 
 async def _flush(bot: Bot):
     t = now()
+    window = in_work_window()  # тек еске салуға
 
     for n in db.q("SELECT * FROM notices WHERE sent=0"):
         status, mid = 1, None
@@ -501,8 +500,8 @@ async def _flush(bot: Bot):
 
     for c in db.q("SELECT * FROM complaints WHERE status='awaiting_program'"):
         last = c["last_reminder_at"]
-        if last and t - parse_dt(last) < timedelta(minutes=REMINDER_EVERY_MIN):
-            continue
+        if last and (not window or t - parse_dt(last) < timedelta(minutes=REMINDER_EVERY_MIN)):
+            continue  # бірінші сұрақ бірден; қайталануы - еске салу, тек жұмыс уақытында
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="SMART", callback_data=f"prog:{c['id']}:smart"),
@@ -527,7 +526,7 @@ async def _flush(bot: Bot):
             db.update("complaints", c["id"], last_reminder_at=iso(now()))
 
     due = [c for c in db.q("SELECT * FROM complaints WHERE status='open' ORDER BY id")
-           if t - parse_dt(c["last_reminder_at"]) >= timedelta(minutes=REMINDER_EVERY_MIN)]
+           if window and t - parse_dt(c["last_reminder_at"]) >= timedelta(minutes=REMINDER_EVERY_MIN)]
     groups: dict[tuple, list] = {}
     for c in due:
         groups.setdefault((c["target_chat"], c["target_thread"]), []).append(c)
@@ -666,7 +665,7 @@ def _status_line(c, t: datetime) -> str:
     if c["status"] == "awaiting_program":
         return "❓ SMART/JUNIOR таңдалмаған"
     if c["status"] == "new":
-        return "🕒 жұмыс уақытын күтіп тұр"
+        return "🕒 жіберілуде"
     hrs = int((t - sla_start(c)).total_seconds() // 3600)
     over = t - sla_start(c) > timedelta(hours=SLA_HOURS)
     flag = "🚨 дедлайн өтті" if over else f"дедлайн {deadline(c):%d.%m %H:%M}"

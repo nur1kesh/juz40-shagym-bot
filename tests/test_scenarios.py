@@ -192,16 +192,15 @@ def test_reply_to_bot_message_also_resolves(env):
 
 
 # ===================================================================== жұмыс уақыты / SLA
-def test_night_complaint_is_silent_then_sla_starts_when_team_is_notified(env):
+def test_night_complaint_is_handled_immediately_but_reminders_wait_for_the_window(env):
     env.clock.set(2026, 10, 17, 22, 30)                       # сенбі түн
     post(env, TECH(), SMART, complaint_text())
-    assert env.bot.sent == [] and C()[0]["status"] == "new"
-    env.clock.set(2026, 10, 18, 14, 0); run(service.flush(env.bot))   # жексенбі
-    assert env.bot.sent == []
-    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))   # дүйсенбі 11:00
+    assert C()[0]["status"] == "open" and len(env.bot.sent) == 1          # бірден қабылданып, тегталды
+    assert "21.10" not in env.bot.sent[0].text and "18.10 22:30" in env.bot.sent[0].text   # дедлайн = +24 сағ
+    env.clock.set(2026, 10, 18, 14, 0); run(service.flush(env.bot))       # жексенбі: еске салу жоқ
     assert len(env.bot.sent) == 1
-    assert "20.10 11:00" in env.bot.sent[0].text, env.bot.sent[0].text   # 24 сағат хабарланған сәттен
-    assert "Дедлайн өтті" not in env.bot.sent[0].text
+    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))       # дүйсенбі 11:00: бірінші еске салу
+    assert len(env.bot.sent) == 2 and "Дедлайн өтті" in env.bot.sent[1].text      # 24 сағат күнтізбелік: сенбі 22:30 + 24 сағ өтіп кеткен
 
 
 def test_reminders_hourly_only_in_window_and_overdue_marker(env):
@@ -217,15 +216,15 @@ def test_reminders_hourly_only_in_window_and_overdue_marker(env):
     assert "Дедлайн өтті" in env.bot.sent[-1].text
 
 
-def test_sunday_nothing_is_sent_and_monday_gets_one_reminder_not_flood(env):
+def test_sunday_complaint_accepted_reminders_only_monday_and_not_a_flood(env):
+    env.clock.set(2026, 10, 18, 12, 0)                        # жексенбі
     post(env, TECH(), SMART, complaint_text())
-    env.clock.set(2026, 10, 18, 12, 0)
+    assert len(env.bot.sent) == 1                             # шағым жексенбіде де қабылданады
     for _ in range(5):
         env.clock.add(hours=1); run(service.flush(env.bot))
-    n = len(env.bot.sent)
-    assert n == 1
+    assert len(env.bot.sent) == 1                             # жексенбіде еске салу жоқ
     env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot)); run(service.flush(env.bot))
-    assert len(env.bot.sent) == n + 1
+    assert len(env.bot.sent) == 2                             # дүйсенбіде бір ғана еске салу
 
 
 # ===================================================================== шаблон тексеру
@@ -238,14 +237,17 @@ def test_invalid_complaint_gets_error_then_edit_registers_it(env):
     assert len(C()) == 1 and C()[0]["status"] == "open"
 
 
-def test_stale_error_notice_cancelled_when_fixed_before_it_was_sent(env):
-    env.clock.set(2026, 10, 18, 12, 0)                        # жексенбі: хабарлама кезекте
+def test_errors_and_resolution_work_outside_the_window_too(env):
+    env.clock.set(2026, 10, 18, 12, 0)                        # жексенбі
     msg = post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))
+    assert "Түзетіңіз" in env.bot.sent[0].text                # қате бірден айтылады
     msg.text = complaint_text()
     run(bm.handle(msg, env.bot, True))
-    env.clock.set(2026, 10, 19, 11, 0); run(service.flush(env.bot))
-    assert not any("Түзетіңіз" in t for t in env.bot.texts())
-    assert len(C()) == 1
+    assert len(C()) == 1 and C()[0]["status"] == "open"
+    post(env, COORD(), SMART, "в процессе", reply=env.bot.sent[-1].id)
+    assert C()[0]["progress_at"] and env.bot.reactions[-1][2][0].emoji == "✍"    # реакция да жексенбіде
+    post(env, COORD(), SMART, resolution_text(), reply=env.bot.sent[-1].id)
+    assert C()[0]["status"] == "resolved" and "шешілді" in env.bot.sent[-1].text
 
 
 def test_screenshot_without_text_prompts_template(env):
@@ -772,9 +774,9 @@ def test_open_list_flags_overdue_and_pending_states(env):
     post(env, TECH(), SMART, complaint_text())
     env.clock.add(hours=30)
     assert "дедлайн өтті" in service.fmt_open_list()[0] and "🚨" in service.fmt_open_list()[0]
-    env.clock.set(2026, 10, 17, 22, 0)                      # сенбі түн: жаңа шағым кезекте
+    env.clock.set(2026, 10, 17, 22, 0)                      # сенбі түн: жаңа шағым да бірден қабылданады
     post(env, TECH(), SMART, complaint_text(student="Түнгі Оқушы", desc="түнде"))
-    assert "жұмыс уақытын күтіп" in "\n".join(service.fmt_open_list())
+    assert "Түнгі Оқушы" in "\n".join(service.fmt_open_list())
 
 
 def test_open_list_is_split_into_telegram_sized_chunks(env):

@@ -22,6 +22,6 @@ def now() -> datetime:
 
 
 def in_work_window(dt: datetime | None = None) -> bool:
-    """Дүйсенбі-сенбі, 11:00-21:00. Жексенбі - демалыс."""
+    """Дүйсенбі-сенбі, 11:00-21:00. Жексенбі - демалыс. Тек сағат сайынғы еске салуға қолданылады."""
     dt = dt or now()
     return dt.weekday() != 6 and WORK_START <= dt.hour < WORK_END
