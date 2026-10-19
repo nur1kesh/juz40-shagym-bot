@@ -77,3 +77,22 @@ async def extract_complaint(text: str) -> dict | None:
     except Exception:
         log.exception("extract_complaint failed")
         return None
+
+
+async def is_progress(reply: str, complaint: str) -> bool:
+    """Шаблонсыз қысқа жауап шағымды қабылдап, шешіп жатқанын білдіре ме? (қабылданды, кб береміз, қарап жатырмыз...)
+    Қате болса False (белгі қоймаймыз)."""
+    system = """Координатор оқушы шағымына қысқа жауап жазды. Бұл жауап шағымды қабылдағанын немесе шешіп жатқанын/
+шешетінін білдіре ме? Иә: «қабылданды», «қарап жатырмыз», «кері байланыс береміз», «шешіліп жатыр», «байланысамыз».
+Жоқ: рахмет, сәлем, сұрақ, шағымға қатысы жоқ чат, шағым мәтінін қайталау.
+Тек JSON: {"progress": true/false}"""
+    try:
+        r = await client.chat.completions.create(
+            model=OPENAI_MODEL, response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": json.dumps({"complaint": complaint[:600], "reply": reply[:300]},
+                                                             ensure_ascii=False)}])
+        return bool(json.loads(r.choices[0].message.content).get("progress"))
+    except Exception:
+        log.exception("is_progress failed")
+        return False

@@ -88,6 +88,7 @@ def env(monkeypatch):
     monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
     monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.ai, "is_progress", AsyncMock(return_value=False))
     monkeypatch.setattr(service.ai, "classify", AsyncMock(
         return_value={"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Есболқызы Арай"}))
     return NS(clock=clock, bot=FakeBot())
@@ -818,3 +819,36 @@ def test_open_in_private_needs_admin(env):
         msg = NS(chat=NS(id=1, type="private"), from_user=NS(id=9), answer=answer)
         run(bm.cmd_open(msg, AdminBot(admin)))
         assert expected in out[0]
+
+
+# ===================================================================== «қабылданды / кб береміз» да процесс
+def test_acknowledgement_phrases_count_as_progress():
+    for yes in ("кеш жарық, қабылданды\nкб береміз", "қабылданды", "кб береміз", "Кері байланыс береміз",
+                "принято", "сообщим позже"):
+        assert service.is_progress_note(yes), yes
+
+
+def test_ack_reply_from_real_chat_marks_progress_without_ai(env):
+    post(env, TECH(), SMART, complaint_text())
+    coord = U(6, "ГҮЛНАЗ СЕРІҚҚЫЗЫ | ГЕОГРАФИЯ КООРДИНАТОРЫ")
+    db.x("INSERT OR REPLACE INTO users(user_id, username, full_name) VALUES(?,?,?)", 6, None, coord.full_name)
+    post(env, coord, SMART, "кеш жарық, қабылданды\nкб береміз", reply=env.bot.sent[0].id)
+    assert C()[0]["progress_at"] and C()[0]["status"] == "open"
+
+
+def test_ai_fallback_detects_progress_in_unusual_wording(env, monkeypatch):
+    post(env, TECH(), SMART, complaint_text())
+    monkeypatch.setattr(service.ai, "is_progress", AsyncMock(return_value=True))
+    post(env, COORD(), SMART, "ертең таңертең оқушымен сөйлесіп көрем", reply=env.bot.sent[0].id)
+    assert C()[0]["progress_at"]
+
+
+def test_ai_fallback_not_used_for_short_noise_or_staff(env, monkeypatch):
+    spy = AsyncMock(return_value=True)
+    monkeypatch.setattr(service.ai, "is_progress", spy)
+    tech = TECH()
+    post(env, tech, SMART, complaint_text())
+    post(env, tech, SMART, "ертең таңертең оқушымен сөйлесіп көрем", reply=env.bot.sent[0].id)   # жазған адам - есепке алынбайды
+    post(env, COORD(), SMART, "ок", reply=env.bot.sent[0].id)                                    # тым қысқа
+    spy.assert_not_awaited()
+    assert C()[0]["progress_at"] is None

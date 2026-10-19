@@ -17,7 +17,10 @@ log = logging.getLogger(__name__)
 PROGRAM_LABEL = {"smart": "SMART", "junior": "JUNIOR"}
 PROGRESS_WORDS = ("процесс", "жұмыс істеп", "жумыс истеп", "қарап жатыр", "карап жатыр", "қарастыр", "шешіліп жатыр",
                   "шешуде", "шешіп жатыр", "шешудеміз", "шешемін", "шешеміз", "айналысып", "іздеп жатыр",
-                  "в работе", "работаем", "занимаемся", "в процессе", "решаем", "разбираем", "уточняем")
+                  "в работе", "работаем", "занимаемся", "в процессе", "решаем", "разбираем", "уточняем",
+                  "қабылданды", "қабылдадық", "қабылдадым", "кб береміз", "кб беремін", "кері байланыс береміз",
+                  "кері байланыс беремін", "жауап береміз", "жауап беремін", "хабарласамыз", "байланысамыз",
+                  "принято", "приняли", "принял", "дадим обратную связь", "сообщим", "ответим")
 PROGRESS_REACTION = "✍"
 SEND_GAP = 0.3        # Telegram лимитінен (≈20 хабарлама/мин топқа) қашу үшін хабарламалар арасы, сек
 RETRY_BACKOFF_MIN = 5  # жіберу сәтсіз болса, қайталау алдындағы үзіліс
@@ -336,7 +339,8 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
         await flush(bot)
         return True
     if not labels:
-        if can_resolve(c, msg.from_user) and is_progress_note(text):
+        if can_resolve(c, msg.from_user) and (
+                is_progress_note(text) or (len(text.strip()) >= 8 and await ai.is_progress(text, c["text"]))):
             await mark_progress(bot, msg, c, text)
         elif not edited and can_resolve(c, msg.from_user) and len(text.strip()) >= 80:
             queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
