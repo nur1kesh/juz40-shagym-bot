@@ -50,6 +50,11 @@ for col in ("review_needed", "review_asked"):
         conn.execute(f"ALTER TABLE complaints ADD COLUMN {col} INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+for col in ("progress_at TEXT", "progress_by TEXT"):
+    try:
+        conn.execute(f"ALTER TABLE complaints ADD COLUMN {col}")
+    except sqlite3.OperationalError:
+        pass
 for col in ("msg_id INTEGER", "ttl INTEGER DEFAULT 15"):
     try:
         conn.execute(f"ALTER TABLE notices ADD COLUMN {col}")

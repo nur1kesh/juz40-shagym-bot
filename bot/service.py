@@ -15,19 +15,30 @@ from .roster import STREAM_NAMES, responsible_for
 
 log = logging.getLogger(__name__)
 PROGRAM_LABEL = {"smart": "SMART", "junior": "JUNIOR"}
+PROGRESS_WORDS = ("процесс", "жұмыс істеп", "жумыс истеп", "қарап жатыр", "карап жатыр", "қарастыр", "шешіліп жатыр",
+                  "шешуде", "шешіп жатыр", "шешудеміз", "шешемін", "шешеміз", "айналысып", "іздеп жатыр",
+                  "в работе", "работаем", "занимаемся", "в процессе", "решаем", "разбираем", "уточняем")
+PROGRESS_REACTION = "✍"
 SEND_GAP = 0.3        # Telegram лимитінен (≈20 хабарлама/мин топқа) қашу үшін хабарламалар арасы, сек
 RETRY_BACKOFF_MIN = 5  # жіберу сәтсіз болса, қайталау алдындағы үзіліс
 _locks: dict[int, asyncio.Lock] = {}
-TPL_KB = InlineKeyboardMarkup(inline_keyboard=[[
-    InlineKeyboardButton(text="📝 Шешім шаблоны", callback_data="tpl:res")]])
-
-
 def iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
 def parse_dt(s: str) -> datetime:
     return datetime.fromisoformat(s).astimezone(TZ)
+
+
+def is_progress_note(text: str) -> bool:
+    """«Процессте», «шешіліп жатыр» сияқты аралық жауап (шаблонсыз, қысқа)."""
+    n = T.norm(text)
+    return len(n) <= 160 and any(w in n for w in PROGRESS_WORDS)
+
+
+def tpl_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📝 Шешім шаблоны", callback_data="tpl:res")]])
 
 
 def thr(t):
@@ -107,12 +118,12 @@ def tags_inline(c) -> str:
     return ", ".join(people.mention(p) for p in people_) or "жауапты анықталмады"
 
 
-def label(c) -> str:
+def label(c, with_issue: bool = True) -> str:
     p = json.loads(c["parsed"] or "{}")
     bits = [PROGRAM_LABEL.get(c["program"], "?")]
     if p.get("subject_label"):
         bits.append(html.escape(re.sub(r"(?i)^\s*(smart|junior)\s*", "", p["subject_label"])) or "")
-    if p.get("issue_title"):
+    if with_issue and p.get("issue_title"):
         bits.append(html.escape(p["issue_title"]))
     return " · ".join(b for b in bits if b)
 
@@ -287,23 +298,43 @@ def find_complaint(chat_id: int, reply_to_id: int):
     return db.q1("SELECT * FROM complaints WHERE id=?", b["complaint_id"]) if b else None
 
 
-async def process_reply(bot: Bot, msg, edited: bool = False):
+async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
+    """False - reply ешбір шағымға байланбады (шақырушы reply-сыз іздеуге көше алады)."""
     c = find_complaint(msg.chat.id, msg.reply_to_message.message_id)
+    if not c:
+        return False
     text = msg.text or msg.caption
-    if not c or not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
-        return
+    if not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
+        return True
     thread = msg.message_thread_id if msg.is_topic_message else 0
     key = f"{msg.chat.id}:{msg.message_id}"
     labels = T.parse(text, T.RESOLUTION_LABELS)
     if labels and not can_resolve(c, msg.from_user):
         deny_notice(msg, thread, key)
-        return await flush(bot)
+        await flush(bot)
+        return True
     if not labels:
-        if not edited and can_resolve(c, msg.from_user) and len(text.strip()) >= 80:
+        if can_resolve(c, msg.from_user) and is_progress_note(text):
+            await mark_progress(bot, msg, c, text)
+        elif not edited and can_resolve(c, msg.from_user) and len(text.strip()) >= 80:
             queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
             await flush(bot)
-        return
+        return True
     await _resolve(bot, msg, c, text, thread, key)
+    return True
+
+
+async def mark_progress(bot: Bot, msg, c, text: str):
+    """«Процессте» деп жауап берілді: шағым ашық қалады, бірақ белгіленеді (✍ реакциясы + еске салуда көрінеді)."""
+    by = (msg.from_user.full_name or "").split("|")[0].strip()
+    db.update("complaints", c["id"], progress_at=iso(now()), progress_by=by)
+    db.x("INSERT INTO replies(complaint_id,user_id,user_name,text,kind,created_at) VALUES(?,?,?,?,?,?)",
+         c["id"], msg.from_user.id, msg.from_user.full_name, text, "progress", iso(now()))
+    if in_work_window():
+        try:
+            await bot.set_message_reaction(msg.chat.id, msg.message_id, [ReactionTypeEmoji(emoji=PROGRESS_REACTION)])
+        except Exception:
+            pass
 
 
 async def _resolve(bot: Bot, msg, c, text: str, thread: int, key: str):
@@ -517,7 +548,7 @@ async def _dispatch_new(bot: Bot, c):
     if c["notes"]:
         lines.append(f"⚠️ {html.escape(c['notes'])}")
     await send(bot, c["target_chat"], c["target_thread"], "\n".join(lines), c["id"],
-               reply_to=target_msg, markup=TPL_KB)
+               reply_to=target_msg, markup=tpl_kb())
     db.update("complaints", c["id"], status="open", last_reminder_at=iso(now()), notified_at=iso(now()))
     try:
         await bot.set_message_reaction(c["src_chat"], c["src_msg"], [ReactionTypeEmoji(emoji="👀")])
@@ -532,26 +563,49 @@ async def _dispatch_new(bot: Bot, c):
                    c["id"], reply_to=c["src_msg"], markup=kb)
 
 
+def _snippet(c, n: int = 110) -> str:
+    d = " ".join((json.loads(c["parsed"] or "{}").get("description") or c["text"] or "").split())
+    return html.escape(d[:n] + ("…" if len(d) > n else ""))
+
+
+def _reminder_text(c, t: datetime) -> str:
+    p = json.loads(c["parsed"] or "{}")
+    hrs = int((t - sla_start(c)).total_seconds() // 3600)
+    over = t - sla_start(c) > timedelta(hours=SLA_HOURS)
+    head = (f"🚨 <b>Мерзім өтті</b> · #{c['id']} · {hrs} сағ" if over
+            else f"⏰ <b>Еске салу</b> · #{c['id']} · {hrs} сағ өтті (мерзім {deadline(c):%d.%m %H:%M})")
+    who = html.escape(p.get("student_name") or "-")
+    lines = [head, f"👤 {who} · {label(c, with_issue=False)}"]
+    about = " · ".join(x for x in (p.get("issue_title"), p.get("employee_role")) if x and x != "-")
+    emp = p.get("employee_name")
+    if about or (emp and emp != "-"):
+        lines.append("📌 " + html.escape(about) + (f": {html.escape(emp)}" if emp and emp != "-" else ""))
+    lines.append(f"💬 «{_snippet(c)}»")
+    if c["progress_at"]:
+        lines.append(f"🔄 <b>Процессте</b> · {html.escape(c['progress_by'] or '')}, {parse_dt(c['progress_at']):%d.%m %H:%M}")
+    else:
+        lines.append("⏳ Жауап күтілуде")
+    lines.append(f"👥 {tags_inline(c)}")
+    return "\n".join(lines)
+
+
 async def _remind_group(bot: Bot, rows: list, t: datetime):
     """Бір topic-те бір уақытта бірнеше шағым болса - бір ортақ хабарлама (чат толмауы үшін)."""
-    def hours(c):
-        return int((t - sla_start(c)).total_seconds() // 3600)
-
-    def over(c):
-        return t - sla_start(c) > timedelta(hours=SLA_HOURS)
-
     first = rows[0]
     if len(rows) == 1:
         c = first
-        head = (f"🚨 <b>Мерзім өтті</b> · #{c['id']} · {label(c)} · {hours(c)} сағ" if over(c)
-                else f"⏰ Еске салу · #{c['id']} · {label(c)} · {hours(c)} сағ (мерзім {deadline(c):%d.%m %H:%M})")
-        await send(bot, c["target_chat"], c["target_thread"], f"{head}\n{tags_inline(c)}", c["id"],
-                   reply_to=c["target_msg"], markup=TPL_KB)
+        await send(bot, c["target_chat"], c["target_thread"], _reminder_text(c, t), c["id"],
+                   reply_to=c["target_msg"], markup=tpl_kb())
     else:
         lines = [f"⏰ <b>Шешілмеген шағымдар ({len(rows)})</b>"]
         for c in rows[:25]:
-            lines.append(f'<a href="{msg_link(c)}">#{c["id"]}</a> · {label(c)} · {hours(c)} сағ'
-                         f'{" 🚨" if over(c) else ""}\n└ {tags_inline(c)}')
+            p = json.loads(c["parsed"] or "{}")
+            hrs = int((t - sla_start(c)).total_seconds() // 3600)
+            mark = " 🚨" if t - sla_start(c) > timedelta(hours=SLA_HOURS) else ""
+            mark += " 🔄" if c["progress_at"] else ""
+            lines.append(f'<a href="{msg_link(c)}">#{c["id"]}</a> · {html.escape(p.get("student_name") or "-")} · '
+                         f'{label(c, with_issue=False)} · {hrs} сағ{mark}\n└ {tags_inline(c)}')
+        lines.append("🔄 - процессте")
         await send(bot, first["target_chat"], first["target_thread"], "\n".join(lines), None)
     for c in rows:
         db.update("complaints", c["id"], last_reminder_at=iso(t), reminder_count=(c["reminder_count"] or 0) + 1)

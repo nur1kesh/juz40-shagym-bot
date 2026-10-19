@@ -188,7 +188,11 @@ async def cb_pick(cb: CallbackQuery, bot: Bot):
 @dp.callback_query(F.data == "tpl:res")
 async def cb_template(cb: CallbackQuery):
     m = await cb.message.answer(T.RESOLUTION_COMPACT, parse_mode="HTML")
-    service.track_ephemeral(m.chat.id, m.message_id, 2)  # 2 мин кейін өшеді
+    # шаблон хабарламасына жауап осы шағымға байланады (координатор шаблонға reply жасаса да көреміз)
+    c = service.find_complaint(cb.message.chat.id, cb.message.message_id)
+    if c:
+        db.x("INSERT OR REPLACE INTO bot_msgs VALUES(?,?,?)", m.chat.id, m.message_id, c["id"])
+    service.track_ephemeral(m.chat.id, m.message_id, 10)  # 10 мин кейін өшеді
     await cb.answer()
 
 
@@ -219,7 +223,10 @@ async def handle(msg: Message, bot: Bot, edited: bool):
     try:
         if is_reply:
             if role != "external_hate":
-                await service.process_reply(bot, msg, edited)
+                handled = await service.process_reply(bot, msg, edited)
+                # reply белгісіз хабарламаға (мысалы, өшіп қалған шаблонға) болса - оқушы аты бойынша іздейміз
+                if handled is False and service.is_loose_resolution(msg.text or msg.caption or ""):
+                    await service.process_loose_resolution(bot, msg, edited)
         elif media_only:
             if not people.is_roster_user(msg.from_user):
                 await service.process_media_only(bot, msg)

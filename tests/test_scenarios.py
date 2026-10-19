@@ -587,3 +587,85 @@ def test_pinall_ignored_for_non_admin_and_reports_missing_pin_right():
     msg, sent = _cmd_msg(b, SMART)
     run(bm.cmd_pinall(msg, b))
     assert "Pin messages" in sent[-1]
+
+
+# ===================================================================== шын чаттан шыққан ақаулар
+def test_reminder_has_student_snippet_deadline_and_people(env):
+    post(env, TECH(), SMART, complaint_text(student="Жансая Абил", desc="Куратор жауап бермейді, ата-ана ашулы"))
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    t = env.bot.sent[-1].text
+    for part in ("Еске салу", "#", "1 сағ", "Жансая Абил", "Куратор жауап бермейді", "@zhhaniya", "Кеш жауап беру",
+                 "мерзім", "Жауап күтілуде"):
+        assert part in t, (part, t)
+
+
+def test_digest_lines_include_student_names(env):
+    for i, name in enumerate(("Айдос Нұрлан", "Мерей Асан")):
+        post(env, TECH(), SMART, complaint_text(student=name, desc=f"мәселе {i}"))
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    t = env.bot.sent[-1].text
+    assert "Айдос Нұрлан" in t and "Мерей Асан" in t
+
+
+class CbMsg:
+    def __init__(self, bot, where, mid):
+        self.chat, self.message_id, self._bot, self.where = NS(id=where[0]), mid, bot, where
+        self.answered = []
+
+    async def answer(self, text, **kw):
+        self._bot._id += 1
+        self.answered.append(self._bot._id)
+        return NS(message_id=self._bot._id, chat=self.chat)
+
+
+def test_reply_to_template_button_message_resolves_the_complaint(env):
+    """Координатор «Шешім шаблоны» батырмасын басып, шыққан шаблонға reply жасайды (шын чаттағы ақау)."""
+    m = post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    cb_msg = CbMsg(env.bot, SMART, notify.id)
+    cb = NS(message=cb_msg, answer=AsyncMock())
+    run(bm.cb_template(cb))
+    template_msg_id = cb_msg.answered[0]
+    post(env, COORD(), SMART, resolution_text(), reply=template_msg_id)
+    assert C()[0]["status"] == "resolved"
+
+
+def test_reply_to_unknown_message_falls_back_to_name_matching(env):
+    post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=999999)     # шаблоны өшіп қалған/белгісіз хабарлама
+    assert C()[0]["status"] == "resolved"
+
+
+def test_progress_reply_marks_complaint_and_reminder_shows_it(env):
+    post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    n_react = len(env.bot.reactions)
+    post(env, COORD(), SMART, "процессте, шешіліп жатыр", reply=notify.id)
+    c = C()[0]
+    assert c["status"] == "open" and c["progress_at"] and "Аружан" in c["progress_by"]
+    assert len(env.bot.reactions) == n_react + 1 and env.bot.reactions[-1][2][0].emoji == "✍"
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    assert "Процессте" in env.bot.sent[-1].text and "Аружан" in env.bot.sent[-1].text
+
+
+def test_progress_variants_and_noise():
+    for yes in ("процессте", "Шешіліп жатыр", "қарап жатырмыз", "в работе", "жұмыс істеп жатырмыз, бүгін шешеміз"):
+        assert service.is_progress_note(yes), yes
+    for no in ("рахмет", "ок", "Қайырлы күн", "түсінікті"):
+        assert not service.is_progress_note(no), no
+
+
+def test_progress_from_author_or_staff_is_ignored(env):
+    tech = TECH()
+    post(env, tech, SMART, complaint_text())
+    notify = env.bot.sent[0]
+    post(env, tech, SMART, "процессте", reply=notify.id)
+    assert C()[0]["progress_at"] is None
+
+
+def test_progress_then_template_still_resolves(env):
+    post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    post(env, COORD(), SMART, "процессте", reply=notify.id)
+    post(env, COORD(), SMART, resolution_text(), reply=notify.id)
+    assert C()[0]["status"] == "resolved"
