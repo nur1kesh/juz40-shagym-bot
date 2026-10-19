@@ -40,6 +40,9 @@ async def cmd_help(msg: Message):
     await msg.answer(
         "Шағым ботының командалары:\n"
         "/bind smart|junior|external — осы topic-ті байлау (админ)\n"
+        "/shablon — шағым шаблоны (админ: /shablon pin)\n"
+        "/shesim — шешім шаблоны (админ: /shesim pin)\n"
+        "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
         "/open — ашық шағымдар\n"
         "/close ID — шағымды қолмен жабу (админ)\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
@@ -66,6 +69,23 @@ async def cmd_shablon(msg: Message, command: CommandObject, bot: Bot):
 @dp.message(Command("shesim"))
 async def cmd_shesim(msg: Message, command: CommandObject, bot: Bot):
     await send_template(msg, bot, T.RESOLUTION_HELP, command)
+
+
+@dp.message(Command("pinall"))
+async def cmd_pinall(msg: Message, bot: Bot):
+    """Админ: шаблондарды бірден жіберіп pin жасайды (шағым шаблоны жоғарыда көрінеді)."""
+    if not await is_admin(bot, msg.chat.id, msg.from_user.id):
+        return
+    role = db.role_of(msg.chat.id, thread_of(msg))
+    texts = [T.COMPLAINT_HELP] if role == "external_hate" else [T.RESOLUTION_HELP, T.COMPLAINT_HELP]
+    for text in texts:
+        m = await msg.answer(text, parse_mode="HTML")
+        try:
+            await bot.pin_chat_message(msg.chat.id, m.message_id, disable_notification=True)
+        except Exception:
+            err = await msg.answer("Pin үшін ботқа 'Pin messages' құқығы керек")
+            service.track_ephemeral(err.chat.id, err.message_id, 5)
+            return
 
 
 @dp.message(Command("bind"))

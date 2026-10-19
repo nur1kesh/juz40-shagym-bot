@@ -534,3 +534,54 @@ def test_ai_failure_does_not_block_complaint(env, monkeypatch):
     post(env, TECH(), SMART, minimal_text())
     p = json.loads(C()[0]["parsed"])
     assert C()[0]["status"] == "open" and p["employee_role"] == "-" and p["issue_title"] == "-"
+
+
+# ===================================================================== /pinall
+class PinBot(FakeBot):
+    def __init__(self, admin=True, can_pin=True):
+        super().__init__()
+        self.admin, self.can_pin, self.pinned = admin, can_pin, []
+
+    async def get_chat_member(self, chat_id, user_id):
+        return NS(status="administrator" if self.admin else "member")
+
+    async def pin_chat_message(self, chat_id, msg_id, **kw):
+        if not self.can_pin:
+            raise RuntimeError("no rights")
+        self.pinned.append(msg_id)
+
+
+def _cmd_msg(bot, where):
+    sent = []
+
+    async def answer(text, **kw):
+        bot._id += 1
+        sent.append(text)
+        return NS(message_id=bot._id, chat=NS(id=where[0]))
+    return NS(chat=NS(id=where[0]), message_thread_id=where[1], is_topic_message=True,
+              from_user=NS(id=99), answer=answer), sent
+
+
+def test_pinall_pins_resolution_then_complaint_template_in_smart_topic():
+    b = PinBot()
+    msg, sent = _cmd_msg(b, SMART)
+    run(bm.cmd_pinall(msg, b))
+    assert len(b.pinned) == 2 and "Шешім шаблоны" in sent[0] and "Шағым шаблоны" in sent[1]   # шағым шаблоны соңғы = жоғарыда
+
+
+def test_pinall_in_external_topic_pins_only_complaint_template():
+    b = PinBot()
+    msg, sent = _cmd_msg(b, EXT)
+    run(bm.cmd_pinall(msg, b))
+    assert len(b.pinned) == 1 and "Шағым шаблоны" in sent[0]
+
+
+def test_pinall_ignored_for_non_admin_and_reports_missing_pin_right():
+    b = PinBot(admin=False)
+    msg, sent = _cmd_msg(b, SMART)
+    run(bm.cmd_pinall(msg, b))
+    assert sent == [] and b.pinned == []
+    b = PinBot(can_pin=False)
+    msg, sent = _cmd_msg(b, SMART)
+    run(bm.cmd_pinall(msg, b))
+    assert "Pin messages" in sent[-1]
