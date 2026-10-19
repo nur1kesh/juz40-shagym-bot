@@ -46,10 +46,10 @@ RESOLUTION_TEMPLATE = """Оқушы аты-жөні:
 Оқушы риза ма?
 Оқушы курста қалды ма? """
 
-COMPLAINT_HELP = "📝 <b>Шағым шаблоны</b>\n<code>" + COMPLAINT_TEMPLATE + "</code>"
+COMPLAINT_HELP = "📝 <b>Шағым шаблоны</b> · /shablon\n<code>" + COMPLAINT_TEMPLATE + "</code>"
 
 RESOLUTION_HELP = (
-    "📝 <b>Шешім шаблоны</b> (шағымға reply)\n<code>" + RESOLUTION_TEMPLATE + "</code>\n"
+    "📝 <b>Шешім шаблоны</b> (шағымға reply) · /shesim\n<code>" + RESOLUTION_TEMPLATE + "</code>\n"
     "<blockquote expandable><b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
     "<b>Риза ма:</b> " + " / ".join(SATISFIED) + "\n"
     "<b>Қалды ма:</b> " + " / ".join(STAYED) + "\n"
