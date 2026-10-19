@@ -852,3 +852,26 @@ def test_ai_fallback_not_used_for_short_noise_or_staff(env, monkeypatch):
     post(env, COORD(), SMART, "ок", reply=env.bot.sent[0].id)                                    # тым қысқа
     spy.assert_not_awaited()
     assert C()[0]["progress_at"] is None
+
+
+# ===================================================================== жаңа шағым (🔔) хабарламасына «в процессе»
+@pytest.mark.parametrize("phrase", ["в процессе", "В процессе, решаем", "в работе", "Процессе", "процессте"])
+def test_progress_reply_to_the_new_complaint_notification(env, phrase):
+    post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    assert "🔔" in notify.text
+    post(env, COORD(), SMART, phrase, reply=notify.id)
+    c = C()[0]
+    assert c["status"] == "open" and c["progress_at"], phrase
+    assert env.bot.reactions[-1][2][0].emoji == "✍"
+
+
+def test_progress_reply_to_the_forwarded_external_complaint_and_its_notification(env):
+    post(env, EXTSELL(), EXT, complaint_text())
+    c = C()[0]
+    notify = [m for m in env.bot.sent if "🔔" in m.text][0]
+    post(env, COORD(), SMART, "в процессе", reply=notify.id)                 # 🔔 хабарламасына
+    assert C()[0]["progress_at"]
+    db.update("complaints", c["id"], progress_at=None)
+    post(env, COORD(), SMART, "в процессе", reply=c["target_msg"])           # көшірілген шағымның өзіне
+    assert C()[0]["progress_at"]
