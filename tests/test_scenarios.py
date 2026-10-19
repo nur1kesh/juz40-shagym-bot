@@ -941,3 +941,72 @@ def test_close_requires_admin_and_reports_unknown_or_double_close(cbot):
     _close(env, str(cid))
     assert "Табылмады" in _close(env, str(cid))[0]
     assert "Табылмады" in _close(env, "9999")[0]
+
+
+# ===================================================================== /delete (қате шағым)
+def _delete(env, args, reply_to=None, admin=True):
+    out = []
+
+    async def reply(text, **kw):
+        out.append(text)
+        return NS(chat=NS(id=SMART[0]), message_id=777)
+
+    async def delete():
+        out.append("<cmd-deleted>")
+    msg = NS(chat=NS(id=SMART[0]), from_user=NS(id=99 if admin else 5, full_name="Админ"), reply=reply,
+             delete=delete, reply_to_message=NS(message_id=reply_to) if reply_to else None)
+    run(bm.cmd_delete(msg, NS(args=args), env.bot))
+    return out
+
+
+def test_delete_removes_complaint_everywhere_and_cleans_bot_messages(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    env.clock.add(hours=1); run(service.flush(env.bot))                 # еске салу да болсын
+    cid = C()[0]["id"]
+    bot_msg_ids = {m.id for m in env.bot.sent}
+    out = _delete(env, str(cid))
+    assert "өшірілді" in out[0]
+    assert C()[0]["status"] == "deleted"
+    assert {mid for _, mid in env.bot.deleted} >= bot_msg_ids          # 🔔 мен еске салу чаттан өшті
+    assert "Ашық шағым жоқ" in service.fmt_open_list()[0]
+    n = len(env.bot.sent)
+    env.clock.add(hours=3); run(service.flush(env.bot))
+    assert len(env.bot.sent) == n                                      # енді еске салу жоқ
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(exporter.build(include_open=True)))
+    assert all(ws.max_row == 1 for ws in wb)                           # тек тақырып қатары, дерек жоқ
+
+
+def test_delete_by_reply_and_works_for_resolved_complaints_too(cbot):
+    env = cbot
+    m = post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)
+    assert C()[0]["status"] == "resolved"
+    _delete(env, "", reply_to=m.message_id)
+    assert C()[0]["status"] == "deleted"
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(exporter.build()))
+    assert all(ws.max_row == 1 for ws in wb)                           # Excel-ге түспейді
+
+
+def test_delete_requires_admin_and_handles_unknown_ids(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    cid = C()[0]["id"]
+    assert _delete(env, str(cid), admin=False) == [] and C()[0]["status"] == "open"
+    assert "Қолданылуы" in _delete(env, "")[0]
+    assert "Табылмады" in _delete(env, "9999")[0]
+    _delete(env, str(cid))
+    assert "Табылмады" in _delete(env, str(cid))[0]
+
+
+def test_deleted_external_complaint_removes_forwarded_copy_and_ignores_later_replies(cbot):
+    env = cbot
+    post(env, EXTSELL(), EXT, complaint_text())
+    c = C()[0]
+    copied_id = c["target_msg"]
+    _delete(env, str(c["id"]))
+    assert (SMART[0], copied_id) in env.bot.deleted                    # көшірілген хабарлама өшті
+    post(env, COORD(), SMART, resolution_text(), reply=copied_id)
+    assert C()[0]["status"] == "deleted"                               # өшірілген шағым қайта жабылмайды

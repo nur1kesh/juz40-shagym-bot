@@ -46,6 +46,7 @@ async def cmd_help(msg: Message):
         "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
         "/open — ашық шағымдар (топта: осы topic; админге жеке чатта: барлығы)\n"
         "/close ID [себебі] — шағымды жабу (админ); шағымға reply етіп /close [себебі] да болады\n"
+        "/delete ID — қате шағымды өшіру (админ); шағымға reply етіп /delete да болады\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
         "/setrole tech|internal — қызметкердің хабарламасына reply етіп рөлін көрсету (админ)\n"
         "/bindings — қазіргі байлаулар")
@@ -142,6 +143,27 @@ async def cmd_close(msg: Message, command: CommandObject, bot: Bot):
     final = {"edu_response": reason or "-", "justified": "", "satisfied": "", "stayed": ""} if reason else None
     ok = await service.close_complaint(bot, cid, msg.from_user.full_name, final)
     await msg.reply(f"✅ #{cid} жабылды" if ok else "Табылмады немесе бұрын жабылған")
+
+
+@dp.message(Command("delete", "del"))
+async def cmd_delete(msg: Message, command: CommandObject, bot: Bot):
+    """Қате шағымды өшіру (админ): /delete 12 немесе шағымға reply етіп /delete."""
+    if not await is_admin(bot, msg.chat.id, msg.from_user.id):
+        return
+    m = re.match(r"#?(\d+)", (command.args or "").strip())
+    cid = int(m.group(1)) if m else None
+    if cid is None and msg.reply_to_message:
+        c = service.find_complaint(msg.chat.id, msg.reply_to_message.message_id)
+        cid = c["id"] if c else None
+    if cid is None:
+        return await msg.reply("Қолданылуы: /delete 12 немесе шағымға reply етіп /delete")
+    ok = await service.delete_complaint(bot, cid)
+    ans = await msg.reply(f"🗑 #{cid} өшірілді" if ok else "Табылмады немесе бұрын өшірілген")
+    try:
+        service.track_ephemeral(ans.chat.id, ans.message_id, 3)
+        await msg.delete()  # команда хабарламасын да жинаймыз (құқық болса)
+    except Exception:
+        pass
 
 
 @dp.message(Command("export"))

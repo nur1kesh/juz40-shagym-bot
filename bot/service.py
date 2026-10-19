@@ -435,6 +435,24 @@ async def finish_pending(bot: Bot, pid: int, cid: int) -> str:
     return f"✅ Шағым #{cid} шешілді деп белгіленді"
 
 
+async def delete_complaint(bot: Bot, cid: int) -> bool:
+    """Қате шағымды өшіру: күйі 'deleted' (тарих сақталады), /open, еске салу және Excel-ден шығады,
+    боттың осы шағымға жазған барлық хабарламасы (🔔, еске салу, шешім, көшірме) чаттан өшеді."""
+    c = db.q1("SELECT * FROM complaints WHERE id=?", cid)
+    if not c or c["status"] == "deleted":
+        return False
+    db.update("complaints", cid, status="deleted")
+    await clear_notices(bot, f"{c['src_chat']}:{c['src_msg']}")
+    for b in db.q("SELECT * FROM bot_msgs WHERE complaint_id=?", cid):
+        try:
+            await bot.delete_message(b["chat_id"], b["msg_id"])
+        except Exception:
+            pass  # 48 сағаттан асқан немесе құқық жоқ - өткізіп жібереміз
+        db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", b["chat_id"], b["msg_id"])
+    db.x("DELETE FROM bot_msgs WHERE complaint_id=?", cid)
+    return True
+
+
 async def close_complaint(bot: Bot, cid: int, by: str, final: dict | None = None):
     c = db.q1("SELECT * FROM complaints WHERE id=?", cid)
     if not c or c["status"] == "resolved":
