@@ -73,19 +73,18 @@ async def cmd_shesim(msg: Message, command: CommandObject, bot: Bot):
 
 @dp.message(Command("pinall"))
 async def cmd_pinall(msg: Message, bot: Bot):
-    """Админ: шаблондарды бірден жіберіп pin жасайды (шағым шаблоны жоғарыда көрінеді)."""
+    """Админ: шағым + шешім шаблонын БІР хабарламада жіберіп, pin жасайды (сыртқы сату topic-інде тек шағым)."""
     if not await is_admin(bot, msg.chat.id, msg.from_user.id):
         return
     role = db.role_of(msg.chat.id, thread_of(msg))
-    texts = [T.COMPLAINT_HELP] if role == "external_hate" else [T.RESOLUTION_HELP, T.COMPLAINT_HELP]
-    for text in texts:
-        m = await msg.answer(text, parse_mode="HTML")
-        try:
-            await bot.pin_chat_message(msg.chat.id, m.message_id, disable_notification=True)
-        except Exception:
-            err = await msg.answer("Pin үшін ботқа 'Pin messages' құқығы керек")
-            service.track_ephemeral(err.chat.id, err.message_id, 5)
-            return
+    text = T.COMPLAINT_HELP if role == "external_hate" else T.COMBINED_HELP
+    m = await msg.answer(text, parse_mode="HTML")
+    try:
+        await bot.pin_chat_message(msg.chat.id, m.message_id, disable_notification=True)
+    except Exception:
+        err = await msg.answer("Pin үшін ботқа 'Pin messages' құқығы керек")
+        service.track_ephemeral(err.chat.id, err.message_id, 5)
+        service.track_ephemeral(m.chat.id, m.message_id, 5)
 
 
 @dp.message(Command("bind"))

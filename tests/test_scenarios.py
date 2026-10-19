@@ -562,18 +562,20 @@ def _cmd_msg(bot, where):
               from_user=NS(id=99), answer=answer), sent
 
 
-def test_pinall_pins_resolution_then_complaint_template_in_smart_topic():
+def test_pinall_pins_one_message_with_both_templates_in_smart_topic():
     b = PinBot()
     msg, sent = _cmd_msg(b, SMART)
     run(bm.cmd_pinall(msg, b))
-    assert len(b.pinned) == 2 and "Шешім шаблоны" in sent[0] and "Шағым шаблоны" in sent[1]   # шағым шаблоны соңғы = жоғарыда
+    assert len(b.pinned) == 1 and len(sent) == 1                       # БІР pin хабарлама
+    assert "Жаңа шағым" in sent[0] and "Шешім" in sent[0]               # екі шаблон бірге
+    assert sent[0].count("<code>") == 2
 
 
 def test_pinall_in_external_topic_pins_only_complaint_template():
     b = PinBot()
     msg, sent = _cmd_msg(b, EXT)
     run(bm.cmd_pinall(msg, b))
-    assert len(b.pinned) == 1 and "Шағым шаблоны" in sent[0]
+    assert len(b.pinned) == 1 and "Шағым шаблоны" in sent[0] and "Шешім" not in sent[0]
 
 
 def test_pinall_ignored_for_non_admin_and_reports_missing_pin_right():

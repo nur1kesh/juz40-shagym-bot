@@ -57,6 +57,15 @@ RESOLUTION_HELP = (
 
 RESOLUTION_COMPACT = "<code>" + RESOLUTION_TEMPLATE + "</code>"
 
+# Бір pin хабарлама: екі шаблон қатар (әрқайсысын бір басумен көшіруге болады)
+COMBINED_HELP = (
+    "📝 <b>Жаңа шағым</b>\n<code>" + COMPLAINT_TEMPLATE + "</code>\n\n"
+    "✅ <b>Шешім</b> (шағымға reply)\n<code>" + RESOLUTION_TEMPLATE + "</code>\n"
+    "<blockquote expandable><b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
+    "<b>Риза ма:</b> " + " / ".join(SATISFIED) + "\n"
+    "<b>Қалды ма:</b> " + " / ".join(STAYED) + "\n"
+    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>")
+
 
 def norm(s: str) -> str:
     s = (s or "").lower().replace("ё", "е")
