@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -44,7 +45,7 @@ async def cmd_help(msg: Message):
         "/shesim — шешім шаблоны (админ: /shesim pin)\n"
         "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
         "/open — ашық шағымдар (топта: осы topic; админге жеке чатта: барлығы)\n"
-        "/close ID — шағымды қолмен жабу (админ)\n"
+        "/close ID [себебі] — шағымды жабу (админ); шағымға reply етіп /close [себебі] да болады\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
         "/setrole tech|internal — қызметкердің хабарламасына reply етіп рөлін көрсету (админ)\n"
         "/bindings — қазіргі байлаулар")
@@ -127,14 +128,20 @@ async def cmd_open(msg: Message, bot: Bot):
 
 @dp.message(Command("close"))
 async def cmd_close(msg: Message, command: CommandObject, bot: Bot):
+    """/close 12 [себебі] немесе шағымға reply етіп /close [себебі]. Тек админ. Себебі "Білім бөлімінің жауабы" болып Excel-ге түседі."""
     if not await is_admin(bot, msg.chat.id, msg.from_user.id):
         return
-    try:
-        cid = int((command.args or "").strip().lstrip("#"))
-    except ValueError:
-        return await msg.reply("Қолданылуы: /close 12")
-    ok = await service.close_complaint(bot, cid, msg.from_user.full_name)
-    await msg.reply("Жабылды" if ok else "Табылмады немесе бұрын жабылған")
+    args = (command.args or "").strip()
+    m = re.match(r"#?(\d+)\s*(.*)", args, re.S)
+    cid, reason = (int(m.group(1)), m.group(2).strip()) if m else (None, args)
+    if cid is None and msg.reply_to_message:
+        c = service.find_complaint(msg.chat.id, msg.reply_to_message.message_id)
+        cid = c["id"] if c else None
+    if cid is None:
+        return await msg.reply("Қолданылуы: /close 12 [себебі] немесе шағымға reply етіп /close [себебі]")
+    final = {"edu_response": reason or "-", "justified": "", "satisfied": "", "stayed": ""} if reason else None
+    ok = await service.close_complaint(bot, cid, msg.from_user.full_name, final)
+    await msg.reply(f"✅ #{cid} жабылды" if ok else "Табылмады немесе бұрын жабылған")
 
 
 @dp.message(Command("export"))

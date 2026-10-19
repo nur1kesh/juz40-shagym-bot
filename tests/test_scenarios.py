@@ -887,3 +887,57 @@ def test_program_question_repeats_hourly_at_any_time(env):
     env.clock.add(minutes=30); run(service.flush(env.bot)); assert len(q()) == 1
     env.clock.add(minutes=31); run(service.flush(env.bot)); assert len(q()) == 2    # 1 сағаттан кейін қайталанады
     env.clock.add(hours=1); run(service.flush(env.bot)); assert len(q()) == 3
+
+
+# ===================================================================== /close
+class CloseBot(FakeBot):
+    async def get_chat_member(self, chat_id, user_id):
+        return NS(status="administrator" if user_id == 99 else "member")
+
+
+def _close(env, args, reply_to=None, admin=True):
+    bot = env.bot
+    out = []
+
+    async def reply(text, **kw):
+        out.append(text)
+    msg = NS(chat=NS(id=SMART[0]), from_user=NS(id=99 if admin else 5, full_name="Админ Аты"), reply=reply,
+             reply_to_message=NS(message_id=reply_to) if reply_to else None)
+    run(bm.cmd_close(msg, NS(args=args), bot))
+    return out
+
+
+@pytest.fixture
+def cbot(env):
+    env.bot = env.bot.__class__ and CloseBot()
+    return env
+
+
+def test_close_by_id_with_reason_writes_reason_into_the_excel_answer(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    out = _close(env, f"#{C()[0]['id']} оқушы курстан бас тартты, шағым қайтарылды")
+    assert "жабылды" in out[0] and C()[0]["status"] == "resolved"
+    assert json.loads(C()[0]["final"])["edu_response"].startswith("оқушы курстан")
+    assert "шешілді" in env.bot.sent[-1].text
+
+
+def test_close_as_reply_to_the_complaint_or_bot_message(cbot):
+    env = cbot
+    m = post(env, TECH(), SMART, complaint_text())
+    out = _close(env, "", reply_to=env.bot.sent[0].id)           # 🔔 хабарламасына reply
+    assert "жабылды" in out[0] and C()[0]["status"] == "resolved"
+    m2 = post(env, TECH(), SMART, complaint_text(student="Басқа Бала", desc="басқа"))
+    out = _close(env, "дубль", reply_to=m2.message_id)           # шағымның өзіне reply
+    assert [c["status"] for c in C()] == ["resolved", "resolved"]
+
+
+def test_close_requires_admin_and_reports_unknown_or_double_close(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    cid = C()[0]["id"]
+    assert _close(env, str(cid), admin=False) == [] and C()[0]["status"] == "open"
+    assert "Қолданылуы" in _close(env, "")[0]
+    _close(env, str(cid))
+    assert "Табылмады" in _close(env, str(cid))[0]
+    assert "Табылмады" in _close(env, "9999")[0]
