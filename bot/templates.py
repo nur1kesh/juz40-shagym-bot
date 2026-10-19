@@ -64,7 +64,8 @@ COMBINED_HELP = (
     "<blockquote expandable><b>Негізделген бе:</b> " + " / ".join(JUSTIFIED) + "\n"
     "<b>Риза ма:</b> " + " / ".join(SATISFIED) + "\n"
     "<b>Қалды ма:</b> " + " / ".join(STAYED) + "\n"
-    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>")
+    "Қате болса хабарламаны өңдеңіз (edit).</blockquote>\n"
+    "Шаблонды қайта алу: /shablon · /shesim")
 
 
 def norm(s: str) -> str:
