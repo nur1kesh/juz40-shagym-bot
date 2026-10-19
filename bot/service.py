@@ -209,6 +209,12 @@ async def _fill_auto(parsed: dict) -> dict:
     return parsed
 
 
+def _worth_ai(text: str) -> bool:
+    """Қысқа чатқа OpenAI шақырмаймыз: көп жолды, телефоны бар немесе ұзын хабарлама ғана."""
+    t = text.strip()
+    return len(t) >= 40 and (t.count("\n") >= 2 or bool(re.search(r"\d{9,}", t)) or len(t) >= 80)
+
+
 async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     text = msg.text or msg.caption
     if not text:
@@ -216,16 +222,32 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     thread = msg.message_thread_id if msg.is_topic_message else 0
     key = f"{msg.chat.id}:{msg.message_id}"
     existing = db.q1("SELECT * FROM complaints WHERE src_chat=? AND src_msg=?", msg.chat.id, msg.message_id)
-    labels = T.parse(text, T.COMPLAINT_LABELS)
-    if not labels:
-        # шаблонсыз ұзын хабарлама - бір рет ескерту; қысқа чатқа үндемейміз
-        if not existing and not edited and len(text.strip()) >= 60:
-            queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шаблонсыз. Шаблон: /shablon")
-            await flush(bot)
-        return
     if existing and existing["status"] == "resolved":
         return
-    parsed, errors, _ = T.validate_complaint(text)
+    labels = T.parse(text, T.COMPLAINT_LABELS)
+    parsed, errors = (None, ["шаблон жоқ"])
+    if labels:
+        parsed, errors, _ = T.validate_complaint(text)
+    if errors:
+        # шаблон дұрыс емес/жоқ: OpenAI еркін мәтіннен өрістерді өзі ажыратып, мүмкін болса қабылдайды
+        ext = await ai.extract_complaint(text) if _worth_ai(text) else None
+        if ext is not None and (ext["is_complaint"] or labels):
+            p2, e2, _ = T.validate_complaint(T.synth_complaint(labels, ext))
+            if not e2:
+                p2["mentioned_usernames"] = re.findall(r"@(\w{4,})", text)
+                p2["chat_link"] = (T.URL_RE.search(text).group(0) if T.URL_RE.search(text) else None)
+                p2["auto"] = True
+                parsed, errors = p2, []
+            else:
+                errors = e2
+        elif ext is not None:
+            return  # чат, шағым емес
+        elif not labels:
+            # OpenAI қолжетімсіз/мәтін қысқа: шаблонсыз ұзын хабарламаға бір рет ескерту
+            if not existing and not edited and len(text.strip()) >= 60:
+                queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шаблонсыз. Шаблон: /shablon")
+                await flush(bot)
+            return
     if errors:
         queue_notice(key, msg.chat.id, thread, msg.message_id, errors_text(errors, "complaint"))
         await flush(bot)
@@ -543,8 +565,11 @@ async def _dispatch_new(bot: Bot, c):
         target_msg = copies[0].message_id
         db.update("complaints", c["id"], target_msg=target_msg)
     due = now() + timedelta(hours=SLA_HOURS)
-    lines = [f"🔔 <b>#{c['id']}</b> · {label(c)}" + (" · сыртқы сату" if c["source"] == "external" else ""),
-             tags_inline(c), f"⏳ Дедлайн: {due:%d.%m %H:%M}"]
+    p = json.loads(c["parsed"] or "{}")
+    lines = [f"🔔 <b>#{c['id']}</b> · {label(c)}" + (" · сыртқы сату" if c["source"] == "external" else "")]
+    if p.get("auto"):  # шаблонсыз жазылып, бот өзі танығанда - не түсінгенін көрсетеміз
+        lines.append(f"👤 {html.escape(p.get('student_name') or '-')}")
+    lines += [tags_inline(c), f"⏳ Дедлайн: {due:%d.%m %H:%M}"]
     if c["notes"]:
         lines.append(f"⚠️ {html.escape(c['notes'])}")
     await send(bot, c["target_chat"], c["target_thread"], "\n".join(lines), c["id"],

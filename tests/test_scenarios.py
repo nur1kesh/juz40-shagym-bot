@@ -87,6 +87,7 @@ def env(monkeypatch):
     monkeypatch.setattr(service, "now", clock.now)
     monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
     monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=None))
     monkeypatch.setattr(service.ai, "classify", AsyncMock(
         return_value={"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Есболқызы Арай"}))
     return NS(clock=clock, bot=FakeBot())
@@ -425,6 +426,8 @@ def test_excel_formula_injection_is_neutralised(env):
     ("SMART Орыс тілі-21", "smart", [("РУСЛИТ", "21")]),
     ("SMART Ағылшын тілі-01", "smart", [("АНГЛ", "01")]),
     ("SMART Қазақстан тарихы-31", "smart", [("ТАРИХ", "31")]),
+    ("СМАРТ МАТ-11", "smart", [("МАТ", "11")]),
+    ("Джуниор БИО", "junior", [("БИО", None)]),
 ])
 def test_subject_parsing(label, program, pairs):
     p, got = T.parse_subject(label)
@@ -669,3 +672,66 @@ def test_progress_then_template_still_resolves(env):
     post(env, COORD(), SMART, "процессте", reply=notify.id)
     post(env, COORD(), SMART, resolution_text(), reply=notify.id)
     assert C()[0]["status"] == "resolved"
+
+
+# ===================================================================== шаблонсыз, бірақ түсінікті жазылған шағым
+FREEFORM = """1)Айтжанова Айлин,
+2)87054678221
+2)ГЕО-21
+3)Азатқан Толғанай
+4)куратором өзіме ұнамайды жеке себептермен
+@Meyrambekovich"""
+EXTRACTED = {"is_complaint": True, "student_name": "Айтжанова Айлин", "phone": "87054678221", "email": None,
+             "subject": "ГЕО-21", "employee_name": "Азатқан Толғанай",
+             "description": "куратором өзіме ұнамайды жеке себептермен"}
+
+
+def test_freeform_numbered_message_is_accepted_automatically(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=EXTRACTED))
+    post(env, TECH(), SMART, FREEFORM)
+    c = C()
+    assert len(c) == 1 and c[0]["status"] == "open"
+    p = json.loads(c[0]["parsed"])
+    assert p["student_name"] == "Айтжанова Айлин" and p["pairs"] == [["ГЕО", "21"]] and p["auto"] is True
+    t = env.bot.sent[0].text
+    assert "Айтжанова Айлин" in t and "@takogeo" in t and "@Meyrambekovich" in t        # 21 ағын ГЕО + супервайзер
+    assert not any("Түзетіңіз" in m for m in env.bot.texts())
+
+
+def test_freeform_chat_that_is_not_a_complaint_is_silent(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value={
+        "is_complaint": False, "student_name": None, "phone": None, "email": None, "subject": None,
+        "employee_name": None, "description": None}))
+    post(env, TECH(), SMART, "Қайырлы күн!\nБүгін сабақ қай уақытта басталады екен?\nКім біледі, айтыңыздаршы")
+    assert C() == [] and env.bot.sent == []
+
+
+def test_freeform_missing_subject_gets_short_error_not_registered(env, monkeypatch):
+    ext = dict(EXTRACTED, subject=None)
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=ext))
+    post(env, TECH(), SMART, FREEFORM)
+    assert C() == [] and "Пән" in env.bot.sent[0].text and len(env.bot.sent[0].text) < 200
+
+
+def test_labelled_but_incomplete_message_is_completed_by_ai(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=EXTRACTED))
+    partial = "Оқушы аты-жөні: Айтжанова Айлин\nПәні және потогы: ГЕО-21\nкуратором өзіме ұнамайды жеке себептермен деп жазды"
+    post(env, TECH(), SMART, partial)
+    assert len(C()) == 1 and json.loads(C()[0]["parsed"])["description"].startswith("куратором")
+
+
+def test_freeform_fixed_by_edit_registers_once(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=dict(EXTRACTED, subject=None)))
+    msg = post(env, TECH(), SMART, FREEFORM)
+    assert C() == []
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=EXTRACTED))
+    run(bm.handle(msg, env.bot, True))
+    assert len(C()) == 1 and C()[0]["status"] == "open"
+
+
+def test_template_without_ai_still_works_and_short_chat_never_calls_ai(env, monkeypatch):
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr(service.ai, "extract_complaint", spy)
+    post(env, TECH(), SMART, complaint_text())            # дұрыс шаблон: OpenAI керек емес
+    post(env, TECH(), SMART, "рахмет")
+    spy.assert_not_awaited()

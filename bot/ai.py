@@ -4,6 +4,7 @@ import logging
 from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY, OPENAI_MODEL
+from .roster import SUBJECTS
 from .templates import ISSUE_TYPES, ROLES, match_enum
 
 log = logging.getLogger(__name__)
@@ -49,3 +50,30 @@ async def classify(description: str) -> dict:
     except Exception:
         log.exception("classify failed; leaving '-'")
     return out
+
+
+async def extract_complaint(text: str) -> dict | None:
+    """Шаблонсыз/еркін жазылған шағымнан өрістерді ажыратады. Қате болса None (шақырушы бұрынғы ережеге көшеді)."""
+    system = f"""Сен білім орталығының сервис бөлімінің көмекшісісің. Хабарлама - қызметкер жазған оқушы шағымы,
+еркін форматта (нөмірленген тізім болуы мүмкін, нөмірлері қате болуы мүмкін). Өрістерді ажыратып ал.
+Тек JSON: {{"is_complaint": bool, "student_name": ..., "phone": ..., "email": ..., "subject": ..., "employee_name": ..., "description": ...}}
+- is_complaint: оқушы/ата-ана шағымы немесе мәселе болса true; сәлем, рахмет, сұрақ, жалпы чат болса false
+- student_name: оқушының аты-жөні
+- phone, email: болса
+- subject: пән және ағын мәтіндегідей, мысалы «ГЕО-21» немесе «SMART ФИЗ, МАТ-01». Пән кодтары: {", ".join(SUBJECTS)}. Ағын: -01/-11/-21/-31. Мәтінде болмаса null
+- employee_name: шағым айтылған куратор/мұғалімнің аты-жөні (тек мәтінде болса)
+- description: шағымның мәні, мәтіндегі сөздермен (аты, телефон, пән, @тегтерді қоспай)
+Мәтінде жоқ нәрсені ойлап қоспа, жоқ өріс - null."""
+    try:
+        r = await client.chat.completions.create(
+            model=OPENAI_MODEL, response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": text}])
+        d = json.loads(r.choices[0].message.content)
+        out = {"is_complaint": bool(d.get("is_complaint"))}
+        for k in ("student_name", "phone", "email", "subject", "employee_name", "description"):
+            v = d.get(k)
+            out[k] = str(v).strip() if v and str(v).strip().lower() not in ("null", "none", "-") else None
+        return out
+    except Exception:
+        log.exception("extract_complaint failed")
+        return None

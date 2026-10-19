@@ -136,8 +136,8 @@ def _subject(tok: str) -> str | None:
 def parse_subject(label: str):
     """'SMART ФИЗ, МАТ-01' -> ('smart', [('ФИЗ','01'), ('МАТ','01')])"""
     up = (label or "").upper()
-    program = "smart" if "SMART" in up else "junior" if "JUNIOR" in up else None
-    up = re.sub(r"SMART|JUNIOR", " ", up)
+    program = ("smart" if re.search(r"SMART|СМАРТ", up) else "junior" if re.search(r"JUNIOR|ДЖУНИОР|ДЖУНИЯР", up) else None)
+    up = re.sub(r"SMART|JUNIOR|СМАРТ|ДЖУНИОР|ДЖУНИЯР", " ", up)
     items: list[list] = []  # [пән|None, ағын|None]; танылмаған сөздер де ағынды тасиды ("Орыс тілі-21")
     for m in re.finditer(r"([A-ZА-ЯӘІҢҒҮҰҚӨҺ]+)\s*(?:-\s*(\d{2})(?!\d))?", up):
         items.append([_subject(m.group(1)), m.group(2)])
@@ -155,6 +155,20 @@ def parse_subject(label: str):
 URL_RE = re.compile(r"https?://\S+|t\.me/\S+", re.I)
 REQUIRED_C = {"student": "Оқушы аты-жөні", "subject": "Пәні және потогы",
               "desc": "Мәселенің толық сипаттамасы"}  # қызметі, мәселе типі, қызметкер - міндетті емес (OpenAI толтырады)
+
+
+def synth_complaint(labels: dict, ext: dict) -> str:
+    """Қолмен жазылған өрістер басым; жетпегенін OpenAI суырып алған мәнмен толтырып, шаблон мәтінін құрастырамыз."""
+    def pick(key, ext_key):
+        return (labels.get(key) or "").strip() or str(ext.get(ext_key) or "").strip()
+    return "\n".join([
+        f"Оқушы аты-жөні: {pick('student', 'student_name')}",
+        f"Телефон нөмірі: {pick('phone', 'phone')}",
+        f"Почта: {pick('email', 'email')}",
+        f"Пәні және потогы: {pick('subject', 'subject')}",
+        f"Қызметкердің аты-жөні: {pick('employee', 'employee_name')}",
+        f"Мәселенің толық сипаттамасы: {pick('desc', 'description')}",
+    ])
 
 
 def validate_complaint(text: str):
