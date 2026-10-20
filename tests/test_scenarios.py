@@ -1119,3 +1119,65 @@ def test_short_vague_solution_still_goes_through_the_ai_gate(env, monkeypatch):
     post(env, COORD(), SMART, short, reply=env.bot.sent[0].id)
     gate.assert_awaited()
     assert C()[0]["status"] == "open"
+
+
+# ===================================================================== ағын ай аты бойынша (шілде 01 ... қараша 41)
+@pytest.mark.parametrize("label,program,pairs", [
+    ("География SMART ҚЫРКҮЙЕК", "smart", [("ГЕО", "21")]),
+    ("ХИМ шілде", None, [("ХИМ", "01")]),
+    ("Физика, математика тамыз", None, [("ФИЗ", "11"), ("МАТ", "11")]),
+    ("SMART БИО қараша", "smart", [("БИО", "41")]),
+    ("Сентябрь ГЕО СМАРТ", "smart", [("ГЕО", "21")]),
+    ("ДЖТ қазан потогы", None, [("ДЖТ", "31")]),
+    ("SMART ГЕО-11 қыркүйек", "smart", [("ГЕО", "11")]),                 # нақты нөмір ай атынан басым
+    ("қыркүйектегі география", None, [("ГЕО", "21")]),
+    ("SMART тарихы шілдедегі", "smart", [("ТАРИХ", "01")]),
+])
+def test_stream_from_month_names(label, program, pairs):
+    p, got = T.parse_subject(label)
+    assert p == program and got == pairs
+
+
+def test_stream_41_is_known_but_has_no_coordinators_yet():
+    from bot.roster import STREAM_NAMES, responsible_for
+    assert STREAM_NAMES["41"] == "41 қараша"
+    coords, sups, notes = responsible_for("smart", ["ГЕО"], "41")
+    assert coords == [] and [p.username for p in sups] == ["Meyrambekovich"]
+
+
+FREEFORM_MONTH = """Қайырлы күн
+Биназир Төлеген
++77718986439
+tolegen.binazir@icloud.com
+География SMART ҚЫРКҮЙЕК
+Аякөз Қыдырбай кураторы
+Мәселе: кураторыммен био кураторыммен сөйлескендей ашылып сөйлесе алмаймын, геодан қиналамын дейді
+Байланыса аласыздар ма?
+@nurzhannn_geo"""
+
+
+def test_screenshot_case_month_name_gives_stream_automatically(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value={
+        "is_complaint": True, "student_name": "Биназир Төлеген", "phone": "+77718986439",
+        "subject": "География SMART ҚЫРКҮЙЕК", "employee_name": "Аякөз Қыдырбай",
+        "description": "кураторыммен сөйлесе алмаймын, геодан қиналамын дейді"}))
+    post(env, TECH(), SMART, FREEFORM_MONTH)
+    assert len(C()) == 1 and C()[0]["status"] == "open"
+    p = json.loads(C()[0]["parsed"])
+    assert p["pairs"] == [["ГЕО", "21"]] and p["subject_label"] == "SMART ГЕО-21"          # Excel форматы
+    t = env.bot.sent[0].text
+    assert "@takogeo" in t and "@nurzhannn_geo" in t and "@Meyrambekovich" in t and not any("Түзетіңіз" in m for m in env.bot.texts())
+
+
+def test_subject_label_is_normalised_for_excel(env):
+    post(env, TECH(), SMART, complaint_text(subject="Физика, математика шілде"))
+    assert json.loads(C()[0]["parsed"])["subject_label"] == "SMART ФИЗ-01, МАТ-01"
+    post(env, TECH(), JUNIOR, complaint_text(student="Басқа Бала", subject="Биология", desc="x"))
+    assert json.loads(C()[1]["parsed"])["subject_label"] == "JUNIOR БИО"
+
+
+def test_junior_topic_does_not_require_stream_even_without_the_word_junior(env):
+    post(env, TECH(), JUNIOR, complaint_text(subject="Биология"))
+    assert len(C()) == 1 and C()[0]["program"] == "junior"
+    post(env, TECH(), SMART, complaint_text(student="Басқа Бала", subject="Биология", desc="x"))   # Smart-та ағын керек
+    assert len(C()) == 1 and "ағын жоқ" in env.bot.sent[-1].text

@@ -132,11 +132,33 @@ def _subject(tok: str) -> str | None:
     return None
 
 
+# Ай аты -> ағын коды (қазақша, орысша; жалғауларымен: «қыркүйектегі», «сентября»)
+MONTH_STREAMS = [("ШІЛДЕ", "01"), ("ИЮЛ", "01"), ("ТАМЫЗ", "11"), ("АВГУСТ", "11"), ("ҚЫРКҮЙЕК", "21"), ("СЕНТЯБР", "21"),
+                 ("ҚАЗАН", "31"), ("ОКТЯБР", "31"), ("ҚАРАША", "41"), ("НОЯБР", "41")]
+
+
+def month_stream(up: str) -> str | None:
+    for word, code in MONTH_STREAMS:
+        if re.search(rf"(?<![A-ZА-ЯӘІҢҒҮҰҚӨҺ]){word}", up):
+            return code
+    return None
+
+
+def normalize_label(program: str | None, pairs) -> str:
+    """Excel-дегі «Пәні және потогы» форматы: 'SMART ГЕО-21', 'SMART ФИЗ-01, МАТ-01', 'JUNIOR БИО'."""
+    head = {"smart": "SMART", "junior": "JUNIOR"}.get(program or "", "")
+    body = ", ".join(f"{s}-{st}" if st else s for s, st in pairs)
+    return (head + " " + body).strip()
+
+
 def parse_subject(label: str):
     """'SMART ФИЗ, МАТ-01' -> ('smart', [('ФИЗ','01'), ('МАТ','01')])"""
     up = (label or "").upper()
     program = ("smart" if re.search(r"SMART|СМАРТ", up) else "junior" if re.search(r"JUNIOR|ДЖУНИОР|ДЖУНИЯР", up) else None)
     up = re.sub(r"SMART|JUNIOR|СМАРТ|ДЖУНИОР|ДЖУНИЯР", " ", up)
+    by_month = month_stream(up)  # «география SMART қыркүйек» -> 21
+    up = re.sub(r"(?<![A-ZА-ЯӘІҢҒҮҰҚӨҺ])(ШІЛДЕ|ИЮЛ|ТАМЫЗ|АВГУСТ|ҚЫРКҮЙЕК|СЕНТЯБР|ҚАЗАН|ОКТЯБР|ҚАРАША|НОЯБР)[A-ZА-ЯӘІҢҒҮҰҚӨҺ]*",
+                " ", up)
     items: list[list] = []  # [пән|None, ағын|None]; танылмаған сөздер де ағынды тасиды ("Орыс тілі-21")
     for m in re.finditer(r"([A-ZА-ЯӘІҢҒҮҰҚӨҺ]+)\s*(?:-\s*(\d{2})(?!\d))?", up):
         items.append([_subject(m.group(1)), m.group(2)])
@@ -147,6 +169,8 @@ def parse_subject(label: str):
         else:
             it[1] = carry
     pairs = [it for it in items if it[0]]
+    for it in pairs:
+        it[1] = it[1] or by_month  # нақты «-31» жазылса, ол басым; болмаса ай аты бойынша
     return program, [tuple(p) for p in pairs]
 
 
@@ -169,7 +193,7 @@ def synth_complaint(labels: dict, ext: dict) -> str:
     ])
 
 
-def validate_complaint(text: str):
+def validate_complaint(text: str, default_program: str | None = None):
     """-> (parsed | None, errors, labels_found)"""
     f = parse(text, COMPLAINT_LABELS)
     errors = []
@@ -183,7 +207,7 @@ def validate_complaint(text: str):
     if f.get("subject"):
         if not pairs:
             errors.append("«Пән»: танылмады, мысал: SMART ГЕО-31")
-        elif program != "junior" and any(not st for _, st in pairs):
+        elif (program or default_program) != "junior" and any(not st for _, st in pairs):
             errors.append("«Пән»: ағын жоқ, мысал: SMART ГЕО-31")
     if errors:
         return None, errors, f

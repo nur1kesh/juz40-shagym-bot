@@ -229,14 +229,15 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     if existing and existing["status"] == "resolved":
         return
     labels = T.parse(text, T.COMPLAINT_LABELS)
+    topic_program = {"smart_hate": "smart", "junior_hate": "junior"}.get(role)  # topic өзі бағдарламаны білдіреді
     parsed, errors = (None, ["шаблон жоқ"])
     if labels:
-        parsed, errors, _ = T.validate_complaint(text)
+        parsed, errors, _ = T.validate_complaint(text, topic_program)
     if errors:
         # шаблон дұрыс емес/жоқ: OpenAI еркін мәтіннен өрістерді өзі ажыратып, мүмкін болса қабылдайды
         ext = await ai.extract_complaint(text) if _worth_ai(text) else None
         if ext is not None and (ext["is_complaint"] or labels):
-            p2, e2, _ = T.validate_complaint(T.synth_complaint(labels, ext))
+            p2, e2, _ = T.validate_complaint(T.synth_complaint(labels, ext), topic_program)
             if not e2:
                 p2["mentioned_usernames"] = re.findall(r"@(\w{4,})", text)
                 p2["chat_link"] = (T.URL_RE.search(text).group(0) if T.URL_RE.search(text) else None)
@@ -273,6 +274,8 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
             await flush(bot)
             return
     await clear_notices(bot, key)
+    if parsed.get("pairs"):  # «География SMART ҚЫРКҮЙЕК» -> «SMART ГЕО-21» (Excel форматы)
+        parsed["subject_label"] = T.normalize_label(program, [tuple(x) for x in parsed["pairs"]])
     parsed = await _fill_auto(parsed)
     if program:
         coords, sups, notes = compute_responsible(program, parsed)
