@@ -1073,3 +1073,23 @@ def test_roster_chem_11_coordinator_replaced():
     usernames = [p.username for p in coords]
     assert usernames == ["beckhac_e", "yergalieva5"]
     assert all("Жеткіншек" not in p.name for p in coords)
+
+
+def test_roster_updated_usernames_and_name_only_people():
+    from types import SimpleNamespace as N
+    from bot import people
+    from bot.roster import ALL_PEOPLE, responsible_for
+    names = {p.username.lower() for p in ALL_PEOPLE if p.username}
+    for old in ("aitoreshkaaiz", "amikowm", "guldanari", "marishka_berekeeva", "mkhmdl", "oralbayeva_aruzhan", "yerganatt",
+                "zere140qazrus", "parvinasavronova", "qaselok", "talshynkaiyrgazina", "tannur_eng", "altynay_kn"):
+        assert old not in names, old
+    for new in ("aitoreshka_juz40quqyq", "amina_info140", "guldana_mc", "mariyam_ruslit140", "mereyka_bio140",
+                "oralbayeva_tarikhjuz40", "yerganat_dzht140", "zere_adebtil140", "parvina_bio140", "qaselok_bio140",
+                "toshageom140", "mereiphys", "assema_chemistry140", "dikosh_juz40"):
+        assert new in names, new
+    for stream in ("01", "11"):                                     # АНГЛ координаторы Сәндібек Мадина
+        coords, _, _ = responsible_for("smart", ["АНГЛ"], stream)
+        assert [p.username for p in coords] == ["sandibekmadina"]
+    coords, sups, _ = responsible_for("smart", ["ФИЗ"], "21")       # ник жоқ координатор аты бойынша танылады
+    assert any(p.name == "Каненова Алтынай" for p in coords)
+    assert people.is_roster_user(N(username=None, full_name="Алтынай Каненова | Физика КООРДИНАТОР"))

@@ -44,20 +44,20 @@ def _parse(block: str) -> dict[str, list[Person]]:
 
 
 SUPERVISORS = _parse("""
-ИНФО: Мұсағали Амина @amikowm
-ФИЗ: Қуанышқызы Мерей Мирида
+ИНФО: Мұсағали Амина @amina_info140
+ФИЗ: Қуанышқызы Мерей Мирида @mereiphys
 МАТ: Асқарбек Асанбай @asanbay_juz40
 ГЕОМ: Асқарбек Асанбай @asanbay_juz40
-ХИМ: Қайырбекова Асем
-БИО: Мухамедали Мерей @mkhmdl
-МС: Рахметқали Гүлдана @guldanari
+ХИМ: Қайырбекова Асем @assema_chemistry140
+БИО: Мухамедали Мерей @mereyka_bio140
+МС: Рахметқали Гүлдана @guldana_mc
 ГЕО: Қалдыбай Әмірхан @Meyrambekovich
 АНГЛ: Рахатов Мәулен @maulen_juz40eng
-ӘДЕБТІЛ: Жасыбаева Зере @zere140qazrus
-РУСЛИТ: Берекеева Мариям @marishka_berekeeva
-ДЖТ: Жұмаханов Ерғанат @yerganatt
-ТАРИХ: Оралбаева Аружан @Oralbayeva_Aruzhan
-ҚҰҚЫҚ: Жасузакова Айтөре @aitoreshkaaiz
+ӘДЕБТІЛ: Жасыбаева Зере @zere_adebtil140
+РУСЛИТ: Берекеева Мариям @mariyam_ruslit140
+ДЖТ: Жұмаханов Ерғанат @yerganat_dzht140
+ТАРИХ: Оралбаева Аружан @oralbayeva_tarikhjuz40
+ҚҰҚЫҚ: Жасузакова Айтөре @aitoreshka_JUZ40quqyq
 """)
 
 # ағын коды -> {пән: [координаторлар]}
@@ -66,12 +66,12 @@ COORDINATORS: dict[str, dict[str, list[Person]]] = {
 ИНФО: Мұса Дариға @darigamussa
 ФИЗ: Талғатұлы Таңат @tanatphyscoord
 ӘДЕБТІЛ: Әшімова Арайлым @araailyma
-АНГЛ: Абди Таңнұр @tannur_eng
+АНГЛ: Сәндібек Мадина @sandibekmadina
 ҚҰҚЫҚ: Серікхан Ақмарал @Akma_quqyq
 ХИМ: Нағымова Махаббат @Nagymova_Mahabbat
 ГЕО: Дәулетбекқызы Камшат @kamoshh_geo
 РУСЛИТ: Абдуллина Камила @camiabdullina
-БИО: Савронова Парвина @parvinasavronova; Мустафаева Ақдидар
+БИО: Савронова Парвина @parvina_bio140; Мустафаева Ақдидар @dikosh_juz40
 МАТ: Бердібекова Гюзель @guzeltm_juz40; Орынбай Айдана @Aidana_apai
 ТАРИХ: Махан Дамир @damirmakhan; Еркінқызы Балауса @balausatarikh; Әбу Айгерім @gera_t01
 ДЖТ: Абдрахманова Назира @naziradzht
@@ -81,30 +81,30 @@ COORDINATORS: dict[str, dict[str, list[Person]]] = {
 ИНФО: Мұса Дариға @darigamussa
 ФИЗ: Тұрарова Аруна @turararuna
 ӘДЕБТІЛ: Әшімова Арайлым @araailyma
-АНГЛ: Абди Таңнұр @tannur_eng
+АНГЛ: Сәндібек Мадина @sandibekmadina
 ҚҰҚЫҚ: Серікхан Ақмарал @Akma_quqyq
 ГЕО: Диханбай Феруза @fbrgeooo; Абдықаппарова Айгүл @ab_a_ta
 РУСЛИТ: Абдуллина Камила @camiabdullina
-БИО: Жомартқызы Әсел @qaselok; Тлекбаева Альбина @tallbyna
+БИО: Жомартқызы Әсел @qaselok_bio140; Тлекбаева Альбина @tallbyna
 МАТ: Байхан Елдос @eld0sikk_juz40; Избасар Айгерім @aiggesar; Исатаева Жаннур @yssataeva
-ТАРИХ: Мақсат Темірлан @timatarikh; Тәуекел Ернұр; Байбосынова Мөлдір @baibosynovam01; Аблимитов Арманжан @vrmvn_tarikh
+ТАРИХ: Мақсат Темірлан @timatarikh; Тәуекел Ернұр @ernuragai; Байбосынова Мөлдір @baibosynovam01; Аблимитов Арманжан @vrmvn_tarikh
 ДЖТ: Тұрсын Балауса @balausa_dzhtcoordinator; Әбдікәрім Нұртөре @nurtoreshkaa
 МС: Оразәлі Бағжан @bagzhanmc
-ХИМ: Совет Назым @beckhac_e; yergalieva5 @yergalieva5
+ХИМ: Совет Назым @beckhac_e; Ергалиева Алина @yergalieva5
 """),
     "21": _parse("""
 ИНФО: Ниязбек Шұғыла @niyazbekshugyla
-ФИЗ: Орынбек Меруерт @meruert_juz40; Каненова Алтынай @altynay_kn
+ФИЗ: Орынбек Меруерт @meruert_juz40; Каненова Алтынай
 ТАРИХ: Махан Дамир @damirmakhan; Қуанышбек Жансая; Оспан Әділет @ospan0v_017; Темірболат Дәурен @Daurenttt; Абдығали Бақтығали @baqtygali17; Есенгелді Қарақат @EsengeldiKarakat
 ГЕО: Серік Гүлназ @takogeo; Алшағыр Нұржан @nurzhannn_geo; Алтынбек Ақбота @botashgeo
 ҚҰҚЫҚ: Ахат Майра @kazbekkyzzy
-ГЕОМ: Қайырғазина Талшын @talshynkaiyrgazina
+ГЕОМ: Қайырғазина Талшын @toshageom140
 МАТ: Орынбай Айдана @Aidana_apai; Бейсенбай Айтолқын @aitolkynbeisenbay; Саматқызы Шұғыла @samatqyzyshugyla; Сулейменов Шалқар @Shalkar_21
 ДЖТ: Орал Нұрсұлтан @daniarulyy_dzht; Урумбай Азамат @azamatdzht; Садық Айшуақ @shuaqdzht21
 ХИМ: Қайбулла Мерей @mereykaybulla; Бигалиева Гулим @g_bigalieva
 РУСЛИТ: Айдар Гаухария @riyaa_drr
 МС: Дюсегалиева Даяна @dayanka04; Кеңшілік Айым @aiymmc
-БИО: Мустафаева Ақдидар; Мұрат Аяулым @ayaulym_bio140; Серіков Әділбек @adil_bio140
+БИО: Мустафаева Ақдидар @dikosh_juz40; Мұрат Аяулым @ayaulym_bio140; Серіков Әділбек @adil_bio140
 АНГЛ: Сәндібек Мадина @sandibekmadina
 ӘДЕБТІЛ: Шанжархан Назерке @naz_erkemmm
 """),
