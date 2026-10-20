@@ -199,6 +199,18 @@ def validate_complaint(text: str):
     return parsed, [], f
 
 
+def synth_resolution(student: str, ext: dict, fallback_text: str = "") -> str:
+    """Шаблонсыз жазылған шешімнен шешім шаблонын құрастырады (жетпейтін өрістер бос қалады)."""
+    sol = (ext.get("solution") or fallback_text or "").strip()
+    return "\n".join([
+        f"Оқушы аты-жөні: {student}",
+        f"Мәселенің шешімі: {sol}",
+        f"Мәселе шындыққа негізделген бе? {ext.get('justified') or ''}",
+        f"Оқушы риза ма? {ext.get('satisfied') or ''}",
+        f"Оқушы курста қалды ма? {ext.get('stayed') or ''}",
+    ])
+
+
 def validate_resolution(text: str, student_expected: str | None):
     f = parse(text, RESOLUTION_LABELS)
     errors = []

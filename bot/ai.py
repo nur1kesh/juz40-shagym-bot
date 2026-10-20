@@ -79,20 +79,39 @@ async def extract_complaint(text: str) -> dict | None:
         return None
 
 
-async def is_progress(reply: str, complaint: str) -> bool:
-    """Шаблонсыз қысқа жауап шағымды қабылдап, шешіп жатқанын білдіре ме? (қабылданды, кб береміз, қарап жатырмыз...)
-    Қате болса False (белгі қоймаймыз)."""
-    system = """Координатор оқушы шағымына қысқа жауап жазды. Бұл жауап шағымды қабылдағанын немесе шешіп жатқанын/
-шешетінін білдіре ме? Иә: «қабылданды», «қарап жатырмыз», «кері байланыс береміз», «шешіліп жатыр», «байланысамыз».
-Жоқ: рахмет, сәлем, сұрақ, шағымға қатысы жоқ чат, шағым мәтінін қайталау.
-Тек JSON: {"progress": true/false}"""
+async def classify_reply(reply: str, complaint: str) -> dict | None:
+    """Координатордың шаблонсыз жауабы: шешім бе (нақты әрекет/нәтиже), аралық жауап па, әлде басқа ма.
+    Шешім болса өрістерді де суырып алады. Қате болса None."""
+    system = """Координатор оқушы шағымына шаблонсыз жауап жазды. Тек JSON:
+{"kind": "resolution" | "progress" | "other", "solution": ..., "satisfied": ..., "justified": ..., "stayed": ...}
+- resolution: координатор әрекетті ЖАСАДЫ (оқушымен/ата-анамен байланысты, сөйледі, ауыстырды) ЖӘНЕ шешімді айтты
+  (не істелді немесе не істелетіні анық белгіленді, мысалы «рейтинг шыққан соң куратор ауыстырылады»). Оқушының реакциясы
+  (риза / наразы) айтылса - міндетті түрде resolution
+- progress: қабылдады / қарап жатыр / кері байланыс береміз / ертең-кейін ІСТЕЙМІН (жоспар) дейді; әрекет әлі жасалмаған, шешім жоқ
+- other: рахмет, сәлем, сұрақ, шағымға қатысы жоқ чат
+resolution болғанда:
+- solution: жауаптың мәні, мәтіндегі сөздермен, 1-3 сөйлем
+- satisfied: "Иә" оқушы шешімге риза/келісті; "Жоқ" наразы; айтылмаса null
+- justified: "Негізделген" | "Жартылай негізделген" | "Негізделмеген" | "КБ бермеді" - тек мәтінде нақты айтылса, әйтпесе null
+- stayed: "Иә" оқушы курста қалады/қалды; "Жоқ" кетеді/кетті; айтылмаса null
+Мәтінде жоқ нәрсені ойлап қоспа, жоқ өріс - null."""
     try:
         r = await client.chat.completions.create(
             model=OPENAI_MODEL, response_format={"type": "json_object"},
             messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": json.dumps({"complaint": complaint[:600], "reply": reply[:300]},
+                      {"role": "user", "content": json.dumps({"complaint": complaint[:600], "reply": reply[:800]},
                                                              ensure_ascii=False)}])
-        return bool(json.loads(r.choices[0].message.content).get("progress"))
+        d = json.loads(r.choices[0].message.content)
+        kind = d.get("kind") if d.get("kind") in ("resolution", "progress", "other") else "other"
+        sol = d.get("solution")
+        return {
+            "kind": kind,
+            "solution": str(sol).strip() if sol and str(sol).strip().lower() != "null" else None,
+            "satisfied": match_enum(str(d.get("satisfied") or ""), ["Иә", "Жоқ"]),
+            "justified": match_enum(str(d.get("justified") or ""),
+                                    ["Негізделген", "Жартылай негізделген", "Негізделмеген", "КБ бермеді"]),
+            "stayed": match_enum(str(d.get("stayed") or ""), ["Иә", "Жоқ"]),
+        }
     except Exception:
-        log.exception("is_progress failed")
-        return False
+        log.exception("classify_reply failed")
+        return None

@@ -339,15 +339,49 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
         await flush(bot)
         return True
     if not labels:
-        if can_resolve(c, msg.from_user) and (
-                is_progress_note(text) or (len(text.strip()) >= 8 and await ai.is_progress(text, c["text"]))):
+        if not can_resolve(c, msg.from_user):
+            return True
+        res = await _free_reply(text, c)
+        if res["kind"] == "progress":
             await mark_progress(bot, msg, c, text)
-        elif not edited and can_resolve(c, msg.from_user) and len(text.strip()) >= 80:
+        elif res["kind"] == "resolution":
+            await offer_resolution(bot, msg, c, text, res, thread, key)
+        elif not edited and len(text.strip()) >= 80:
             queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
             await flush(bot)
         return True
     await _resolve(bot, msg, c, text, thread, key)
     return True
+
+
+async def _free_reply(text: str, c) -> dict:
+    """Шаблонсыз жауап: аралық па, шешім бе, әлде басқа ма. Қысқа және анық «процессте» сөздері OpenAI-сыз танылады."""
+    t = text.strip()
+    if len(t) <= 100 and is_progress_note(t):
+        return {"kind": "progress"}
+    if len(t) < 8:
+        return {"kind": "other"}
+    res = await ai.classify_reply(t, c["text"])
+    if res is None:  # OpenAI істемесе: тек сөздер бойынша
+        return {"kind": "progress" if is_progress_note(t) else "other"}
+    return res
+
+
+async def offer_resolution(bot: Bot, msg, c, text: str, ext: dict, thread: int, key: str):
+    """Координатор шешімді шаблонсыз жазды: бәрі анық болса жабамыз, әйтпесе дайын толтырылған шаблон ұсынамыз."""
+    student = json.loads(c["parsed"] or "{}").get("student_name") or ""
+    tpl = T.synth_resolution(student, ext, text)
+    _, errors, _ = T.validate_resolution(tpl, student)
+    if not errors:
+        await _resolve(bot, msg, c, tpl, thread, key)
+        return
+    missing = [name for name, k in (("Негізделген бе?", "justified"), ("Риза ма?", "satisfied"),
+                                    ("Қалды ма?", "stayed")) if not ext.get(k)]
+    note = ("Жетпейді: " + ", ".join(missing)) if missing else "; ".join(errors)
+    queue_notice(key, msg.chat.id, thread, msg.message_id,
+                 f"📝 Шешім сияқты. Жабу үшін толықтырып жіберіңіз:\n<code>{html.escape(tpl)}</code>\n{html.escape(note)}",
+                 ttl=30)
+    await flush(bot)
 
 
 async def mark_progress(bot: Bot, msg, c, text: str):

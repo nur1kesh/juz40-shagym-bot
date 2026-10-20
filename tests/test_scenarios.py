@@ -88,7 +88,7 @@ def env(monkeypatch):
     monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
     monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=None))
-    monkeypatch.setattr(service.ai, "is_progress", AsyncMock(return_value=False))
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={"kind": "other"}))
     monkeypatch.setattr(service.ai, "classify", AsyncMock(
         return_value={"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Есболқызы Арай"}))
     return NS(clock=clock, bot=FakeBot())
@@ -840,14 +840,14 @@ def test_ack_reply_from_real_chat_marks_progress_without_ai(env):
 
 def test_ai_fallback_detects_progress_in_unusual_wording(env, monkeypatch):
     post(env, TECH(), SMART, complaint_text())
-    monkeypatch.setattr(service.ai, "is_progress", AsyncMock(return_value=True))
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={"kind": "progress"}))
     post(env, COORD(), SMART, "ертең таңертең оқушымен сөйлесіп көрем", reply=env.bot.sent[0].id)
     assert C()[0]["progress_at"]
 
 
 def test_ai_fallback_not_used_for_short_noise_or_staff(env, monkeypatch):
-    spy = AsyncMock(return_value=True)
-    monkeypatch.setattr(service.ai, "is_progress", spy)
+    spy = AsyncMock(return_value={"kind": "progress"})
+    monkeypatch.setattr(service.ai, "classify_reply", spy)
     tech = TECH()
     post(env, tech, SMART, complaint_text())
     post(env, tech, SMART, "ертең таңертең оқушымен сөйлесіп көрем", reply=env.bot.sent[0].id)   # жазған адам - есепке алынбайды
@@ -1010,3 +1010,58 @@ def test_deleted_external_complaint_removes_forwarded_copy_and_ignores_later_rep
     assert (SMART[0], copied_id) in env.bot.deleted                    # көшірілген хабарлама өшті
     post(env, COORD(), SMART, resolution_text(), reply=copied_id)
     assert C()[0]["status"] == "deleted"                               # өшірілген шағым қайта жабылмайды
+
+
+# ===================================================================== шаблонсыз жазылған ШЕШІМ (процесс емес)
+FREE_RESOLUTION = ("Жауапты коорд оқушымен байланысты, кураторын рейтинг шыққан соң ауыстырып береді. "
+                   "Оқушы шешімге риза")
+
+
+def test_free_text_resolution_is_not_marked_as_progress_and_gets_a_prefilled_template(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": "Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады",
+        "satisfied": "Иә", "justified": None, "stayed": None}))
+    post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
+    n_react = len(env.bot.reactions)
+    post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
+    c = C()[0]
+    assert c["status"] == "open" and c["progress_at"] is None            # «процессте» деп белгіленбейді
+    assert len(env.bot.reactions) == n_react                              # ✍ жоқ
+    t = env.bot.sent[-1].text
+    assert "Шешім сияқты" in t and "Айтжанова Айлин" in t and "риза ма? Иә" in t
+    assert "Жетпейді: Негізделген бе?, Қалды ма?" in t
+    assert "<code>" in t
+
+
+def test_prefilled_template_can_be_completed_by_reply_to_the_bot_message(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": "Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады",
+        "satisfied": "Иә", "justified": None, "stayed": None}))
+    post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
+    post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
+    offer = env.bot.sent[-1]
+    done = ("Оқушы аты-жөні: Айтжанова Айлин\nМәселенің шешімі: Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады\n"
+            "Мәселе шындыққа негізделген бе? Негізделген\nОқушы риза ма? Иә\nОқушы курста қалды ма? Иә")
+    post(env, COORD(), SMART, done, reply=offer.id)                       # боттың ұсынысына reply
+    assert C()[0]["status"] == "resolved"
+
+
+def test_free_text_resolution_with_all_facts_closes_automatically(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": "Оқушымен байланысқа шықтық, куратор ауыстырылды, оқушы курста қалады",
+        "satisfied": "Иә", "justified": "Негізделген", "stayed": "Иә"}))
+    post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
+    post(env, COORD(), SMART, FREE_RESOLUTION + ", курста қалады, шағым дұрыс болды", reply=env.bot.sent[0].id)
+    c = C()[0]
+    assert c["status"] == "resolved"
+    f = json.loads(c["final"])
+    assert (f["justified"], f["satisfied"], f["stayed"]) == ("Негізделген", "Иә", "Иә")
+
+
+def test_classify_reply_failure_falls_back_to_keywords_only(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value=None))
+    post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)      # AI жоқ, сөздер жоқ -> ештеңе істемейді
+    assert C()[0]["progress_at"] is None and C()[0]["status"] == "open"
+    post(env, COORD(), SMART, "қабылданды", reply=env.bot.sent[0].id)           # сөздер бойынша процесс
+    assert C()[0]["progress_at"]
