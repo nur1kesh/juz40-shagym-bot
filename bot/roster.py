@@ -90,7 +90,7 @@ COORDINATORS: dict[str, dict[str, list[Person]]] = {
 ТАРИХ: Мақсат Темірлан @timatarikh; Тәуекел Ернұр; Байбосынова Мөлдір @baibosynovam01; Аблимитов Арманжан @vrmvn_tarikh
 ДЖТ: Тұрсын Балауса @balausa_dzhtcoordinator; Әбдікәрім Нұртөре @nurtoreshkaa
 МС: Оразәлі Бағжан @bagzhanmc
-ХИМ: Совет Назым @beckhac_e; Рашидұлы Жеткіншек
+ХИМ: Совет Назым @beckhac_e; yergalieva5 @yergalieva5
 """),
     "21": _parse("""
 ИНФО: Ниязбек Шұғыла @niyazbekshugyla

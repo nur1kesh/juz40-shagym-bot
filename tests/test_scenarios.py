@@ -1065,3 +1065,11 @@ def test_classify_reply_failure_falls_back_to_keywords_only(env, monkeypatch):
     assert C()[0]["progress_at"] is None and C()[0]["status"] == "open"
     post(env, COORD(), SMART, "қабылданды", reply=env.bot.sent[0].id)           # сөздер бойынша процесс
     assert C()[0]["progress_at"]
+
+
+def test_roster_chem_11_coordinator_replaced():
+    from bot.roster import responsible_for
+    coords, sups, _ = responsible_for("smart", ["ХИМ"], "11")
+    usernames = [p.username for p in coords]
+    assert usernames == ["beckhac_e", "yergalieva5"]
+    assert all("Жеткіншек" not in p.name for p in coords)
