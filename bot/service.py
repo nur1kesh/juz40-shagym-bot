@@ -22,6 +22,7 @@ PROGRESS_WORDS = ("процесс", "жұмыс істеп", "жумыс ист�
                   "кері байланыс беремін", "жауап береміз", "жауап беремін", "хабарласамыз", "байланысамыз",
                   "принято", "приняли", "принял", "дадим обратную связь", "сообщим", "ответим")
 PROGRESS_REACTION = "✍"
+SOLUTION_AI_CHECK_BELOW = 80  # осыдан қысқа шешімді ғана OpenAI «мазмұнды ма» деп тексереді
 SEND_GAP = 0.3        # Telegram лимитінен (≈20 хабарлама/мин топқа) қашу үшін хабарламалар арасы, сек
 RETRY_BACKOFF_MIN = 5  # жіберу сәтсіз болса, қайталау алдындағы үзіліс
 _locks: dict[int, asyncio.Lock] = {}
@@ -399,7 +400,8 @@ async def mark_progress(bot: Bot, msg, c, text: str):
 async def _resolve(bot: Bot, msg, c, text: str, thread: int, key: str):
     expected = json.loads(c["parsed"] or "{}").get("student_name")
     final, errors, _ = T.validate_resolution(text, expected)
-    if not errors:
+    if not errors and len(final["edu_response"]) < SOLUTION_AI_CHECK_BELOW:
+        # ұзын шешім өзі мазмұнды: OpenAI тексермейді (қайта-қайта қабылдамай, жауапты ренжітпеу үшін)
         verdict = await ai.check_solution(c["text"], final["edu_response"])
         if not verdict.get("ok", True):
             errors = [f"«Мәселенің шешімі» нақты емес: {verdict.get('reason') or 'нақтылаңыз'}"]

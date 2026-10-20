@@ -1093,3 +1093,29 @@ def test_roster_updated_usernames_and_name_only_people():
     coords, sups, _ = responsible_for("smart", ["ФИЗ"], "21")       # ник жоқ координатор аты бойынша танылады
     assert any(p.name == "Каненова Алтынай" for p in coords)
     assert people.is_roster_user(N(username=None, full_name="Алтынай Каненова | Физика КООРДИНАТОР"))
+
+
+def test_long_concrete_solution_is_accepted_without_ai_gate(env, monkeypatch):
+    """Шын чаттағы жағдай: толық шешім «нақты емес» деп қайтарылған."""
+    gate = AsyncMock(return_value={"ok": False, "reason": "қатты талап"})
+    monkeypatch.setattr(service.ai, "check_solution", gate)
+    post(env, TECH(), SMART, complaint_text(student="Жибек Тныштыбай"))
+    text = ("Оқушы аты-жөні: Жибек Тныштыбай\nМәселенің шешімі: оқушы тақырыптардан қалып қойған, сол үшін қыркүйек ағынына "
+            "ауыстыдық, сол қалып қойған тақырыптарынан керi бастайды\nМәселе шындыққа негізделген бе? Негізделген\n"
+            "Оқушы риза ма? Иә, риза\nОқушы курста қалды ма? Иә")
+    post(env, COORD(), SMART, text, reply=env.bot.sent[0].id)
+    assert C()[0]["status"] == "resolved"
+    gate.assert_not_awaited()
+    f = json.loads(C()[0]["final"])
+    assert f["satisfied"] == "Иә" and f["stayed"] == "Иә"                  # «Иә, риза» да «Иә» деп танылды
+
+
+def test_short_vague_solution_still_goes_through_the_ai_gate(env, monkeypatch):
+    gate = AsyncMock(return_value={"ok": False, "reason": "нақтылаңыз"})
+    monkeypatch.setattr(service.ai, "check_solution", gate)
+    post(env, TECH(), SMART, complaint_text())
+    short = resolution_text().replace("Оқушымен байланысқа шықтық, себебі анықталды, кураторға ескерту жасалды.",
+                                      "Мәселе шешілді, оқушымен сөйлестім, бәрі жақсы")
+    post(env, COORD(), SMART, short, reply=env.bot.sent[0].id)
+    gate.assert_awaited()
+    assert C()[0]["status"] == "open"
