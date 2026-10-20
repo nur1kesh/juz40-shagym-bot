@@ -1181,3 +1181,53 @@ def test_junior_topic_does_not_require_stream_even_without_the_word_junior(env):
     assert len(C()) == 1 and C()[0]["program"] == "junior"
     post(env, TECH(), SMART, complaint_text(student="Басқа Бала", subject="Биология", desc="x"))   # Smart-та ағын керек
     assert len(C()) == 1 and "ағын жоқ" in env.bot.sent[-1].text
+
+
+# ===================================================================== ортақ еске салу тізіміне (digest) reply
+def _two_open_with_digest(env):
+    post(env, TECH(), SMART, complaint_text(student="Жансая Абил", desc="бірінші мәселе"))
+    post(env, TECH(), SMART, complaint_text(student="Шұғыла Төлеген", desc="екінші мәселе"))
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    digest = env.bot.sent[-1]
+    assert "Шешілмеген шағымдар (2)" in digest.text
+    return digest
+
+
+def test_progress_reply_to_digest_is_attributed_by_student_name(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={"kind": "progress"}))   # ұзын мәтін: OpenAI шешеді
+    digest = _two_open_with_digest(env)
+    n_react = len(env.bot.reactions)
+    text = ("Шұғыла Төлеген- кураторы Сагидуллиева Аида. Оқушы осы уақытқа дейін жақсы оқып келіпті.\n"
+            "Бүгін кешке кураторы жеке митта сөйлеседі, жауабын жазатын боламын")
+    post(env, COORD(), SMART, text, reply=digest.id)
+    by_student = {json.loads(c["parsed"])["student_name"]: c for c in C()}
+    assert by_student["Шұғыла Төлеген"]["progress_at"] and by_student["Жансая Абил"]["progress_at"] is None
+    assert len(env.bot.reactions) == n_react + 1 and env.bot.reactions[-1][2][0].emoji == "✍"
+
+
+def test_digest_reply_with_complaint_number_or_single_candidate(env):
+    digest = _two_open_with_digest(env)
+    first_id = C()[0]["id"]
+    post(env, COORD(), SMART, f"#{first_id} қабылданды, кб береміз", reply=digest.id)
+    assert C()[0]["progress_at"] and C()[1]["progress_at"] is None
+    for c in C():                                           # тізімде бір ғана шағым болса - нөмір/аты керек емес
+        db.update("complaints", c["id"], status="deleted")
+    post(env, TECH(), SMART, complaint_text(student="Жалғыз Оқушы", desc="жалғыз"))
+    env.clock.add(hours=2); run(service.flush(env.bot))
+    single = env.bot.sent[-1]
+    post(env, COORD(), SMART, "қабылданды, кб береміз", reply=single.id)
+    assert C()[-1]["progress_at"]
+
+
+def test_ambiguous_digest_reply_asks_which_complaint_and_marks_nothing(env):
+    digest = _two_open_with_digest(env)
+    post(env, COORD(), SMART, "қабылданды, кб береміз", reply=digest.id)
+    assert all(c["progress_at"] is None for c in C())
+    assert "Қай шағым" in env.bot.sent[-1].text
+
+
+def test_digest_reply_with_resolution_template_closes_the_named_student(env):
+    digest = _two_open_with_digest(env)
+    post(env, COORD(), SMART, resolution_text(student="Шұғыла Төлеген"), reply=digest.id)
+    by_student = {json.loads(c["parsed"])["student_name"]: c["status"] for c in C()}
+    assert by_student == {"Жансая Абил": "open", "Шұғыла Төлеген": "resolved"}

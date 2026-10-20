@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS media_groups(
   created_at TEXT, status TEXT, PRIMARY KEY(chat_id, group_id));
 CREATE TABLE IF NOT EXISTS ephemeral(
   chat_id INTEGER, msg_id INTEGER, delete_at TEXT, PRIMARY KEY(chat_id, msg_id));
+CREATE TABLE IF NOT EXISTS digest_msgs(
+  chat_id INTEGER, msg_id INTEGER, complaint_id INTEGER, PRIMARY KEY(chat_id, msg_id, complaint_id));
 CREATE INDEX IF NOT EXISTS ix_c_status ON complaints(status);
 """)
 for col in ("review_needed", "review_asked"):

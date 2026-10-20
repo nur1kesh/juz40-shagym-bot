@@ -330,9 +330,22 @@ def find_complaint(chat_id: int, reply_to_id: int):
 async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
     """False - reply ешбір шағымға байланбады (шақырушы reply-сыз іздеуге көше алады)."""
     c = find_complaint(msg.chat.id, msg.reply_to_message.message_id)
-    if not c:
-        return False
     text = msg.text or msg.caption
+    if not c:
+        cands = digest_candidates(msg.chat.id, msg.reply_to_message.message_id)
+        if not cands:
+            return False
+        c = pick_from_digest(text or "", cands)
+        if not c:  # ортақ тізімге жауап, бірақ қай шағым екені белгісіз
+            if text and T.parse(text, T.RESOLUTION_LABELS):
+                return False  # шаблон болса, оқушы аты бойынша жалпы іздеу жұмыс істейді
+            if text and can_resolve(cands[0], msg.from_user):
+                thread = msg.message_thread_id if msg.is_topic_message else 0
+                queue_notice(f"{msg.chat.id}:{msg.message_id}", msg.chat.id, thread, msg.message_id,
+                             "❓ Қай шағым? Шағымның #нөмірін немесе оқушы атын жазыңыз, не шағым хабарламасына reply етіңіз.",
+                             ttl=10)
+                await flush(bot)
+            return True
     if not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
         return True
     thread = msg.message_thread_id if msg.is_topic_message else 0
@@ -386,6 +399,31 @@ async def offer_resolution(bot: Bot, msg, c, text: str, ext: dict, thread: int, 
                  f"📝 Шешім сияқты. Жабу үшін толықтырып жіберіңіз:\n<code>{html.escape(tpl)}</code>\n{html.escape(note)}",
                  ttl=30)
     await flush(bot)
+
+
+def digest_candidates(chat_id: int, msg_id: int) -> list:
+    rows = db.q("SELECT c.* FROM digest_msgs d JOIN complaints c ON c.id=d.complaint_id "
+                "WHERE d.chat_id=? AND d.msg_id=? AND c.status IN ('open','new') ORDER BY c.id", chat_id, msg_id)
+    return list(rows)
+
+
+def pick_from_digest(text: str, cands: list):
+    """Ортақ тізімге жауап: #нөмір, не оқушы аты бойынша ЖАЛҒЫЗ шағымды таңдаймыз; болмаса None."""
+    m = re.search(r"#\s*(\d+)", text)
+    if m:
+        for c in cands:
+            if c["id"] == int(m.group(1)):
+                return c
+    if len(cands) == 1:
+        return cands[0]
+    toks = {t for t in T.norm(text).split() if len(t) >= 3}
+    scored = []
+    for c in cands:
+        name = json.loads(c["parsed"] or "{}").get("student_name") or ""
+        scored.append((len(toks & {t for t in T.norm(name).split() if len(t) >= 3}), c))
+    best = max(sc for sc, _ in scored)
+    top = [c for sc, c in scored if sc == best]
+    return top[0] if best > 0 and len(top) == 1 else None
 
 
 async def mark_progress(bot: Bot, msg, c, text: str):
@@ -691,7 +729,9 @@ async def _remind_group(bot: Bot, rows: list, t: datetime):
             lines.append(f'<a href="{msg_link(c)}">#{c["id"]}</a> · {html.escape(p.get("student_name") or "-")} · '
                          f'{label(c, with_issue=False)} · {hrs} сағ{mark}\n└ {tags_inline(c)}')
         lines.append("🔄 - процессте")
-        await send(bot, first["target_chat"], first["target_thread"], "\n".join(lines), None)
+        m = await send(bot, first["target_chat"], first["target_thread"], "\n".join(lines), None)
+        for c in rows[:25]:  # осы тізімге reply жасалса, қай шағым екенін оқушы аты бойынша табамыз
+            db.x("INSERT OR IGNORE INTO digest_msgs VALUES(?,?,?)", first["target_chat"], m.message_id, c["id"])
     for c in rows:
         db.update("complaints", c["id"], last_reminder_at=iso(t), reminder_count=(c["reminder_count"] or 0) + 1)
 
