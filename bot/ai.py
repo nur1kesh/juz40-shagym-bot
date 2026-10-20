@@ -59,10 +59,12 @@ async def extract_complaint(text: str) -> dict | None:
     system = f"""Сен білім орталығының сервис бөлімінің көмекшісісің. Хабарлама - қызметкер жазған оқушы шағымы,
 еркін форматта (нөмірленген тізім болуы мүмкін, нөмірлері қате болуы мүмкін). Өрістерді ажыратып ал.
 Тек JSON: {{"is_complaint": bool, "student_name": ..., "phone": ..., "subject": ..., "employee_name": ..., "description": ...}}
-- is_complaint: оқушы/ата-ана шағымы немесе мәселе болса true; сәлем, рахмет, сұрақ, жалпы чат болса false
+- is_complaint: оқушы/ата-ана шағымы немесе мәселе болса true. Хабарламада оқушы аты мен байланыс/пән/куратор көрсетілсе
+  (сипаттамасы жоқ болса да, ол скриншотта болуы мүмкін) - бұл шағым тіркеу, true. Сәлем, рахмет, сұрақ, жалпы чат болса false
 - student_name: оқушының аты-жөні
 - phone: болса
-- subject: пән және ағын, мысалы «ГЕО-21» немесе «SMART ФИЗ, МАТ-01». Пән кодтары: {", ".join(SUBJECTS)}.
+- subject: пән және ағын, мысалы «ГЕО-21» немесе «SMART ФИЗ, МАТ-01». Пән кодтары: {", ".join(SUBJECTS)}
+  (қысқа код: Т = ТАРИХ, «Т-21» -> «ТАРИХ-21»).
   Ағын коды: шілде=01, тамыз=11, қыркүйек=21, қазан=31, қараша=41 (ай аты жазылса, соны кодқа айналдыр:
   «география SMART қыркүйек» -> «SMART ГЕО-21»). Мәтінде пән болмаса null
 - employee_name: шағым айтылған куратор/мұғалімнің аты-жөні (тек мәтінде болса)
@@ -118,4 +120,22 @@ resolution болғанда:
         }
     except Exception:
         log.exception("classify_reply failed")
+        return None
+
+
+async def read_screenshot(image: bytes) -> str | None:
+    """Скриншоттағы мәтінді оқиды (шағым сипаттамасы көбіне суретте болады). Қате болса None."""
+    import base64
+    mime = "image/png" if image[:4] == b"\x89PNG" else "image/jpeg"
+    b64 = base64.b64encode(image).decode()
+    try:
+        r = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "Суреттегі мәтінді дәл көшіріп жаз (өз сөзіңсіз). Мәтін болмаса бос жауап бер."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}])
+        out = (r.choices[0].message.content or "").strip()
+        return out[:1500] or None
+    except Exception:
+        log.exception("read_screenshot failed")
         return None

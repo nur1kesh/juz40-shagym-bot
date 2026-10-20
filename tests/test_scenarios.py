@@ -69,6 +69,9 @@ class FakeBot:
     async def delete_message(self, chat_id, msg_id):
         self.deleted.append((chat_id, msg_id))
 
+    async def download(self, file, destination=None):
+        return io.BytesIO(b"\xff\xd8fake-jpeg")
+
     def texts(self):
         return [m.text for m in self.sent]
 
@@ -88,6 +91,7 @@ def env(monkeypatch):
     monkeypatch.setattr(service, "in_work_window", lambda dt=None: REAL_WINDOW(dt or clock.now()))
     monkeypatch.setattr(service.ai, "check_solution", AsyncMock(return_value={"ok": True, "reason": ""}))
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.ai, "read_screenshot", AsyncMock(return_value=None))
     monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={"kind": "other"}))
     monkeypatch.setattr(service.ai, "classify", AsyncMock(
         return_value={"role": "Куратор", "title": "Кеш жауап беру", "employee_name": "Есболқызы Арай"}))
@@ -712,7 +716,7 @@ def test_freeform_chat_that_is_not_a_complaint_is_silent(env, monkeypatch):
 def test_freeform_missing_subject_gets_short_error_not_registered(env, monkeypatch):
     ext = dict(EXTRACTED, subject=None)
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=ext))
-    post(env, TECH(), SMART, FREEFORM)
+    post(env, TECH(), SMART, FREEFORM.replace("2)ГЕО-21", "2)пәні жоқ"))              # мәтінде пән коды мүлде жоқ
     assert C() == [] and "Пән" in env.bot.sent[0].text and len(env.bot.sent[0].text) < 200
 
 
@@ -725,9 +729,10 @@ def test_labelled_but_incomplete_message_is_completed_by_ai(env, monkeypatch):
 
 def test_freeform_fixed_by_edit_registers_once(env, monkeypatch):
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=dict(EXTRACTED, subject=None)))
-    msg = post(env, TECH(), SMART, FREEFORM)
+    msg = post(env, TECH(), SMART, FREEFORM.replace("2)ГЕО-21", "2)пәні жоқ"))
     assert C() == []
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=EXTRACTED))
+    msg.text = FREEFORM                                                              # менеджер пәнді қосып өңдеді (edit)
     run(bm.handle(msg, env.bot, True))
     assert len(C()) == 1 and C()[0]["status"] == "open"
 
@@ -1231,3 +1236,73 @@ def test_digest_reply_with_resolution_template_closes_the_named_student(env):
     post(env, COORD(), SMART, resolution_text(student="Шұғыла Төлеген"), reply=digest.id)
     by_student = {json.loads(c["parsed"])["student_name"]: c["status"] for c in C()}
     assert by_student == {"Жансая Абил": "open", "Шұғыла Төлеген": "resolved"}
+
+
+# ===================================================================== скриншот + қысқа caption (сипаттама суретте)
+SHOT_CAPTION = """Қайырлы кеш🙌
+Жәнібекқызы Аяжан
++77770337269
+Т-21
+Көркем Оразғалиева
+@oralbayeva_tarikhjuz40"""
+NO_DESC = {"is_complaint": False, "student_name": "Жәнібекқызы Аяжан", "phone": "+77770337269", "subject": None,
+           "employee_name": "Көркем Оразғалиева", "description": None}
+OCR_TEXT = "Жәнібекқызы Аяжан 87770337269\nТарих пәні 21ші ағым\nКуратор ауыстыруым себебі жұмысын дұрыс атқара алмайды"
+
+
+def photo_msg(env, caption):
+    m = M(TECH(), SMART, caption=caption, ctype="photo")
+    m.photo = [NS(file_id="small"), NS(file_id="big")]
+    return m
+
+
+def test_screenshot_with_structured_caption_is_accepted_and_description_read_from_the_picture(env, monkeypatch):
+    full = dict(NO_DESC, is_complaint=True, subject=None,
+                description="Куратор ауыстыруым себебі жұмысын дұрыс атқара алмайды")
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(side_effect=[NO_DESC, full]))
+    shot = AsyncMock(return_value=OCR_TEXT)
+    monkeypatch.setattr(service.ai, "read_screenshot", shot)
+    run(bm.handle(photo_msg(env, SHOT_CAPTION), env.bot, False))
+    shot.assert_awaited_once()
+    c = C()
+    assert len(c) == 1 and c[0]["status"] == "open"
+    p = json.loads(c[0]["parsed"])
+    assert p["description"].startswith("Куратор ауыстыруым") and p["pairs"] == [["ТАРИХ", "21"]]   # «Т-21» = ТАРИХ-21
+    assert p["student_name"] == "Жәнібекқызы Аяжан" and p["subject_label"] == "SMART ТАРИХ-21"
+    assert "@oralbayeva_tarikhjuz40" in env.bot.sent[0].text                                      # тарих супервайзері
+
+
+def test_screenshot_ocr_unavailable_still_accepts_with_attachment_placeholder(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=NO_DESC))
+    run(bm.handle(photo_msg(env, SHOT_CAPTION), env.bot, False))                                    # read_screenshot -> None
+    c = C()
+    assert len(c) == 1 and "тіркемеде" in json.loads(c[0]["parsed"])["description"]
+
+
+def test_message_without_screenshot_and_without_description_asks_for_it(env, monkeypatch):
+    ext = dict(NO_DESC, is_complaint=True)
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=ext))
+    post(env, TECH(), SMART, SHOT_CAPTION)                                                          # сурет те, сипаттама да жоқ
+    assert C() == [] and "сипаттамасы" in env.bot.sent[0].text.lower()
+
+
+def test_chat_with_picture_but_no_student_is_still_ignored(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value={
+        "is_complaint": False, "student_name": None, "phone": None, "subject": None,
+        "employee_name": None, "description": None}))
+    run(bm.handle(photo_msg(env, "Міне кестемен таныс болыңыздар, ертең сабақ осылай болады"), env.bot, False))
+    assert C() == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Т-21", "Т-21"), ("Көркем Оразғалиева\n+7 777 033 72 69\nГЕО-31 қазан", "ГЕО-31"), ("тарих - 11", "ТАРИХ-11"),
+    ("87770337269", None), ("сәлем, қалайсыз", None), ("Асан-21 жас", None),
+])
+def test_find_subject_in_text(text, expected):
+    assert T.find_subject_in_text(text) == expected
+
+
+def test_openai_missed_subject_but_text_has_code_is_found_deterministically(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=dict(EXTRACTED, subject=None)))
+    post(env, TECH(), SMART, FREEFORM)                                               # мәтінде «2)ГЕО-21» бар
+    assert len(C()) == 1 and json.loads(C()[0]["parsed"])["pairs"] == [["ГЕО", "21"]]

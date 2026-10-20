@@ -151,6 +151,15 @@ def normalize_label(program: str | None, pairs) -> str:
     return (head + " " + body).strip()
 
 
+def find_subject_in_text(text: str) -> str | None:
+    """Мәтіннен «Т-21», «ГЕО-31» сияқты пән-ағын кодын іздейді (OpenAI тауып бере алмағанда)."""
+    for m in re.finditer(r"(?<![\wәіңғүұқөһ])([A-Za-zА-ЯЁа-яёӘІҢҒҮҰҚӨҺәіңғүұқөһ]{1,12})\s*[-–]\s*(\d{2})(?!\d)", text or ""):
+        tok = m.group(1).upper()
+        if _subject(tok):
+            return f"{tok}-{m.group(2)}"
+    return None
+
+
 def parse_subject(label: str):
     """'SMART ФИЗ, МАТ-01' -> ('smart', [('ФИЗ','01'), ('МАТ','01')])"""
     up = (label or "").upper()

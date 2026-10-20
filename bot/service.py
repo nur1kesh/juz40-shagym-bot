@@ -213,6 +213,28 @@ async def _fill_auto(parsed: dict) -> dict:
     return parsed
 
 
+def _is_image_doc(msg) -> bool:
+    d = getattr(msg, "document", None)
+    return bool(d and (getattr(d, "mime_type", "") or "").startswith("image/"))
+
+
+async def _ocr(bot: Bot, msg) -> str | None:
+    """Хабарламадағы суретті (фото не сурет-файл) жүктеп, ішіндегі мәтінді оқиды."""
+    try:
+        photo = getattr(msg, "photo", None)
+        file = photo[-1] if photo else (msg.document if _is_image_doc(msg) else None)
+        if file is None:
+            return None
+        buf = await bot.download(file)
+        data = buf.read() if buf else b""
+        if not data or len(data) > 8_000_000:
+            return None
+        return await ai.read_screenshot(data)
+    except Exception:
+        log.exception("ocr failed")
+        return None
+
+
 def _worth_ai(text: str) -> bool:
     """Қысқа чатқа OpenAI шақырмаймыз: көп жолды, телефоны бар немесе ұзын хабарлама ғана."""
     t = text.strip()
@@ -235,8 +257,19 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
         parsed, errors, _ = T.validate_complaint(text, topic_program)
     if errors:
         # шаблон дұрыс емес/жоқ: OpenAI еркін мәтіннен өрістерді өзі ажыратып, мүмкін болса қабылдайды
-        ext = await ai.extract_complaint(text) if _worth_ai(text) else None
-        if ext is not None and (ext["is_complaint"] or labels):
+        has_media = bool(getattr(msg, "photo", None) or _is_image_doc(msg))
+        work = text
+        ext = await ai.extract_complaint(work) if (_worth_ai(text) or has_media) else None
+        if has_media and (ext is None or not ext.get("description")):
+            ocr = await _ocr(bot, msg)  # сипаттама көбіне скриншотта: суреттегі мәтінді оқимыз
+            if ocr:
+                work = f"{text}\n\n[Скриншоттағы мәтін]\n{ocr}"
+                ext = await ai.extract_complaint(work) or ext
+        if ext is not None and (ext["is_complaint"] or labels or (has_media and ext.get("student_name"))):
+            ext = dict(ext)
+            ext["subject"] = ext.get("subject") or T.find_subject_in_text(work)
+            if has_media and not ext.get("description"):
+                ext["description"] = "Сипаттама тіркемеде (скриншот)"
             p2, e2, _ = T.validate_complaint(T.synth_complaint(labels, ext), topic_program)
             if not e2:
                 p2["mentioned_usernames"] = re.findall(r"@(\w{4,})", text)
