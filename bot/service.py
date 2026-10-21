@@ -57,15 +57,24 @@ def queue_notice(key: str, chat_id, thread_id, reply_to, text: str, buttons=None
          key, chat_id, thread_id, reply_to, text, json.dumps(buttons) if buttons else None, ttl)
 
 
+async def safe_delete(bot: Bot, chat_id: int, msg_id: int, reason: str) -> bool:
+    """Боттың КЕЗ КЕЛГЕН хабарлама өшіруі осы жерден өтеді және журналға жазылады (/status көрсетеді)."""
+    try:
+        await bot.delete_message(chat_id, msg_id)
+        ok = True
+    except Exception:
+        ok = False
+    db.x("INSERT INTO deletions(at, chat_id, msg_id, reason) VALUES(?,?,?,?)",
+         iso(now()), chat_id, msg_id, reason + ("" if ok else " (сәтсіз)"))
+    return ok
+
+
 async def clear_notices(bot: Bot, key: str, keep_id: int | None = None):
     """Кезектегіні болдырмайды, жіберілгенін чаттан өшіреді (қате түзетілгенде чат таза қалу үшін)."""
     db.x("UPDATE notices SET sent=2 WHERE key=? AND sent=0", key)
     for n in db.q("SELECT * FROM notices WHERE key=? AND sent=1 AND msg_id IS NOT NULL AND id!=?",
                   key, keep_id or -1):
-        try:
-            await bot.delete_message(n["chat_id"], n["msg_id"])
-        except Exception:
-            pass
+        await safe_delete(bot, n["chat_id"], n["msg_id"], "қате/ескерту түзетілді")
         db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", n["chat_id"], n["msg_id"])
         db.x("UPDATE notices SET sent=2 WHERE id=?", n["id"])
 
@@ -78,10 +87,7 @@ def track_ephemeral(chat_id: int, msg_id: int, minutes: float):
 async def _sweep_ephemeral(bot: Bot):
     for e in db.q("SELECT * FROM ephemeral"):
         if parse_dt(e["delete_at"]) <= now():
-            try:
-                await bot.delete_message(e["chat_id"], e["msg_id"])
-            except Exception:
-                pass
+            await safe_delete(bot, e["chat_id"], e["msg_id"], "уақытша хабарлама (TTL)")
             db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", e["chat_id"], e["msg_id"])
 
 
@@ -546,8 +552,9 @@ async def finish_pending(bot: Bot, pid: int, cid: int) -> str:
 
 
 async def delete_complaint(bot: Bot, cid: int) -> bool:
-    """Қате шағымды өшіру: күйі 'deleted' (тарих сақталады), /open, еске салу және Excel-ден шығады,
-    боттың осы шағымға жазған барлық хабарламасы (🔔, еске салу, шешім, көшірме) чаттан өшеді."""
+    """Қате шағымды өшіру: күйі 'deleted' (тарих сақталады), /open, еске салу және Excel-ден шығады.
+    Чаттағы боттың хабарламалары ӨШІРІЛМЕЙДІ (басқалар көре алмай қалмауы үшін): текст хабарлама
+    «🗑 #N қате шағым ретінде өшірілді» белгісіне ауысады, түймелері алынады."""
     c = db.q1("SELECT * FROM complaints WHERE id=?", cid)
     if not c or c["status"] == "deleted":
         return False
@@ -555,12 +562,34 @@ async def delete_complaint(bot: Bot, cid: int) -> bool:
     await clear_notices(bot, f"{c['src_chat']}:{c['src_msg']}")
     for b in db.q("SELECT * FROM bot_msgs WHERE complaint_id=?", cid):
         try:
-            await bot.delete_message(b["chat_id"], b["msg_id"])
+            await bot.edit_message_text(f"🗑 <b>#{cid}</b> қате шағым ретінде өшірілді", chat_id=b["chat_id"],
+                                        message_id=b["msg_id"], parse_mode="HTML", reply_markup=None)
         except Exception:
-            pass  # 48 сағаттан асқан немесе құқық жоқ - өткізіп жібереміз
+            pass  # сурет/көшірме мәтін емес - өзгеріссіз қалады
         db.x("DELETE FROM ephemeral WHERE chat_id=? AND msg_id=?", b["chat_id"], b["msg_id"])
     db.x("DELETE FROM bot_msgs WHERE complaint_id=?", cid)
     return True
+
+
+def fmt_status() -> str:
+    """Админге: бот күйі, ашық шағымдар, соңғы өшірулер мен қателер (мәселе іздеуге)."""
+    t = now()
+    counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM complaints GROUP BY status")}
+    lines = [f"🩺 Бот жұмыс істеп тұр · {t:%d.%m %H:%M}",
+             "Шағымдар: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "жоқ"),
+             f"Кезекте ескерту: {db.q1('SELECT COUNT(*) n FROM notices WHERE sent=0')['n']} · "
+             f"өшуі күтілетін хабарлама: {db.q1('SELECT COUNT(*) n FROM ephemeral')['n']}"]
+    binds = db.q("SELECT role, chat_id, thread_id FROM bindings")
+    lines.append("Байлау: " + (", ".join(f"{b['role']}→{b['thread_id']}" for b in binds) or "жоқ"))
+    dels = db.q("SELECT * FROM deletions ORDER BY id DESC LIMIT 6")
+    lines.append("Боттың соңғы өшірулері:" + ("" if dels else " жоқ"))
+    for d in dels:
+        lines.append(f"• {parse_dt(d['at']):%d.%m %H:%M} · #{d['msg_id']} · {d['reason']}")
+    errs = db.q("SELECT * FROM errors ORDER BY id DESC LIMIT 5")
+    lines.append("Соңғы қателер:" + ("" if errs else " жоқ"))
+    for e in errs:
+        lines.append(f"• {parse_dt(e['at']):%d.%m %H:%M} · {e['source']} · {(e['text'] or '')[:140]}")
+    return "\n".join(html.escape(x) for x in lines)
 
 
 async def close_complaint(bot: Bot, cid: int, by: str, final: dict | None = None):

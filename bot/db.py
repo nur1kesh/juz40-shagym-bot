@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS ephemeral(
   chat_id INTEGER, msg_id INTEGER, delete_at TEXT, PRIMARY KEY(chat_id, msg_id));
 CREATE TABLE IF NOT EXISTS digest_msgs(
   chat_id INTEGER, msg_id INTEGER, complaint_id INTEGER, PRIMARY KEY(chat_id, msg_id, complaint_id));
+CREATE TABLE IF NOT EXISTS deletions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, chat_id INTEGER, msg_id INTEGER, reason TEXT);
+CREATE TABLE IF NOT EXISTS errors(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, source TEXT, text TEXT);
 CREATE INDEX IF NOT EXISTS ix_c_status ON complaints(status);
 """)
 for col in ("review_needed", "review_asked"):

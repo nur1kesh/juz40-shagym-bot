@@ -42,7 +42,7 @@ class Clock:
 
 class FakeBot:
     def __init__(self):
-        self.sent, self.copied, self.reactions = [], [], []
+        self.sent, self.copied, self.reactions, self.edited = [], [], [], []
         self.fail_chat = None
         self.deleted = []
         self._id = 5000
@@ -72,6 +72,9 @@ class FakeBot:
     async def download(self, file, destination=None):
         return io.BytesIO(b"\xff\xd8fake-jpeg")
 
+    async def edit_message_text(self, text, chat_id=None, message_id=None, **kw):
+        self.edited.append((chat_id, message_id, text))
+
     def texts(self):
         return [m.text for m in self.sent]
 
@@ -79,7 +82,7 @@ class FakeBot:
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     for t in ("bindings", "users", "complaints", "replies", "bot_msgs", "notices", "pending_res",
-              "media_msgs", "media_groups"):
+              "media_msgs", "media_groups", "ephemeral", "digest_msgs", "deletions", "errors"):
         db.x(f"DELETE FROM {t}")
     db.bind("smart_hate", *SMART)
     db.bind("junior_hate", *JUNIOR)
@@ -964,7 +967,7 @@ def _delete(env, args, reply_to=None, admin=True):
     return out
 
 
-def test_delete_removes_complaint_everywhere_and_cleans_bot_messages(cbot):
+def test_delete_keeps_bot_messages_visible_as_a_tombstone_and_removes_the_complaint(cbot):
     env = cbot
     post(env, TECH(), SMART, complaint_text())
     env.clock.add(hours=1); run(service.flush(env.bot))                 # еске салу да болсын
@@ -973,7 +976,9 @@ def test_delete_removes_complaint_everywhere_and_cleans_bot_messages(cbot):
     out = _delete(env, str(cid))
     assert "өшірілді" in out[0]
     assert C()[0]["status"] == "deleted"
-    assert {mid for _, mid in env.bot.deleted} >= bot_msg_ids          # 🔔 мен еске салу чаттан өшті
+    assert env.bot.deleted == []                                        # чаттан ештеңе өшпейді (басқалар көре алады)
+    assert {mid for _, mid, _ in env.bot.edited} >= bot_msg_ids         # 🔔 мен еске салу «🗑 өшірілді» белгісіне ауысты
+    assert all("қате шағым ретінде өшірілді" in t for _, _, t in env.bot.edited)
     assert "Ашық шағым жоқ" in service.fmt_open_list()[0]
     n = len(env.bot.sent)
     env.clock.add(hours=3); run(service.flush(env.bot))
@@ -1006,13 +1011,13 @@ def test_delete_requires_admin_and_handles_unknown_ids(cbot):
     assert "Табылмады" in _delete(env, str(cid))[0]
 
 
-def test_deleted_external_complaint_removes_forwarded_copy_and_ignores_later_replies(cbot):
+def test_deleted_external_complaint_ignores_later_replies_and_deletes_nothing(cbot):
     env = cbot
     post(env, EXTSELL(), EXT, complaint_text())
     c = C()[0]
     copied_id = c["target_msg"]
     _delete(env, str(c["id"]))
-    assert (SMART[0], copied_id) in env.bot.deleted                    # көшірілген хабарлама өшті
+    assert (SMART[0], copied_id) not in env.bot.deleted                # көшірме де өшпейді
     post(env, COORD(), SMART, resolution_text(), reply=copied_id)
     assert C()[0]["status"] == "deleted"                               # өшірілген шағым қайта жабылмайды
 
@@ -1306,3 +1311,32 @@ def test_openai_missed_subject_but_text_has_code_is_found_deterministically(env,
     monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=dict(EXTRACTED, subject=None)))
     post(env, TECH(), SMART, FREEFORM)                                               # мәтінде «2)ГЕО-21» бар
     assert len(C()) == 1 and json.loads(C()[0]["parsed"])["pairs"] == [["ГЕО", "21"]]
+
+
+# ===================================================================== боттың өшіруі журналға жазылады + /status
+def test_every_bot_deletion_is_logged_and_status_shows_it(env, monkeypatch):
+    post(env, TECH(), SMART, None, ctype="photo")                       # «мәтінсіз» ескерту (ttl 15 мин)
+    assert db.q1("SELECT COUNT(*) n FROM deletions")["n"] == 0
+    env.clock.add(minutes=16); run(service.flush(env.bot))              # TTL өтті -> бот өшірді
+    d = db.q("SELECT * FROM deletions")
+    assert len(d) == 1 and "TTL" in d[0]["reason"]
+    status = service.fmt_status()
+    assert "Боттың соңғы өшірулері" in status and "TTL" in status and "Шағымдар" in status
+
+
+def test_important_messages_are_never_auto_deleted(env):
+    """🔔, еске салу, ✅ шешілді: уақыт өткенде де чаттан өшпейді (тек қате/шаблон/ /open уақытша)."""
+    m = post(env, TECH(), SMART, complaint_text())
+    env.clock.add(hours=1); run(service.flush(env.bot))
+    post(env, COORD(), SMART, resolution_text(), reply=env.bot.sent[0].id)
+    env.clock.add(days=3); run(service.flush(env.bot))
+    assert env.bot.deleted == []
+    assert db.q1("SELECT COUNT(*) n FROM ephemeral")["n"] == 0
+    assert db.q1("SELECT COUNT(*) n FROM deletions")["n"] == 0
+
+
+def test_errors_are_recorded_for_status(env):
+    import logging
+    logging.getLogger("bot.test").error("сынақ қатесі")
+    assert any("сынақ қатесі" in e["text"] for e in db.q("SELECT * FROM errors"))
+    assert "сынақ қатесі" in service.fmt_status()

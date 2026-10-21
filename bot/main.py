@@ -5,7 +5,7 @@ import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, Message
 
 from . import ai, db, exporter, people, service, templates as T
 from .config import BOT_TOKEN, now
@@ -49,7 +49,8 @@ async def cmd_help(msg: Message):
         "/delete ID — қате шағымды өшіру (админ); шағымға reply етіп /delete да болады\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
         "/setrole tech|internal — қызметкердің хабарламасына reply етіп рөлін көрсету (админ)\n"
-        "/bindings — қазіргі байлаулар")
+        "/bindings — қазіргі байлаулар\n"
+        "/status — бот күйі, соңғы өшірулер мен қателер (админ)")
 
 
 async def send_template(msg: Message, bot: Bot, text: str, command: CommandObject):
@@ -161,9 +162,23 @@ async def cmd_delete(msg: Message, command: CommandObject, bot: Bot):
     ans = await msg.reply(f"🗑 #{cid} өшірілді" if ok else "Табылмады немесе бұрын өшірілген")
     try:
         service.track_ephemeral(ans.chat.id, ans.message_id, 3)
-        await msg.delete()  # команда хабарламасын да жинаймыз (құқық болса)
+        await service.safe_delete(bot, msg.chat.id, msg.message_id, "/delete командасының өзі")
     except Exception:
         pass
+
+
+@dp.message(Command("status"))
+async def cmd_status(msg: Message, bot: Bot):
+    """Админге: бот күйі, соңғы өшірулер мен қателер."""
+    if msg.chat.type == "private":
+        allowed = await is_admin_anywhere(bot, msg.from_user.id)
+    else:
+        allowed = await is_admin(bot, msg.chat.id, msg.from_user.id)
+    if not allowed:
+        return
+    m = await msg.answer(service.fmt_status(), parse_mode="HTML")
+    if msg.chat.type != "private":
+        service.track_ephemeral(m.chat.id, m.message_id, 3)
 
 
 @dp.message(Command("export"))
@@ -212,7 +227,7 @@ async def cb_program(cb: CallbackQuery, bot: Bot):
               target_chat=tgt["chat_id"], target_thread=tgt["thread_id"],
               responsible=service.resp_json(coords, sups),
               notes="; ".join(notes))
-    await cb.message.delete()
+    await service.safe_delete(bot, cb.message.chat.id, cb.message.message_id, "түйме сұрағы жауапталды")
     await cb.answer()
     await service.flush(bot)
 
@@ -225,7 +240,7 @@ async def cb_pick(cb: CallbackQuery, bot: Bot):
                     and not await is_admin(bot, cb.message.chat.id, cb.from_user.id)):
         return await cb.answer("Тек шешімді жазған адам немесе админ", show_alert=True)
     result = await service.finish_pending(bot, int(pid), int(cid))
-    await cb.message.delete()
+    await service.safe_delete(bot, cb.message.chat.id, cb.message.message_id, "түйме сұрағы жауапталды")
     await cb.answer(result, show_alert=not result.startswith("✅"))
 
 
@@ -248,7 +263,7 @@ async def cb_role(cb: CallbackQuery, bot: Bot):
         return await cb.answer("Тек жазған адам таңдай алады", show_alert=True)
     db.set_staff_role(c["author_id"], role)
     db.x("UPDATE complaints SET author_role=? WHERE author_id=? AND author_role IS NULL", role, c["author_id"])
-    await cb.message.delete()
+    await service.safe_delete(bot, cb.message.chat.id, cb.message.message_id, "түйме сұрағы жауапталды")
     await cb.answer()
 
 
@@ -280,6 +295,36 @@ async def handle(msg: Message, bot: Bot, edited: bool):
             await service.process_complaint(bot, msg, role, edited)
     except Exception:
         log.exception("handler error")
+
+
+class DbErrorHandler(logging.Handler):
+    """ERROR деңгейіндегі барлық журнал жазбасын базаға да жазады (админ /status арқылы көреді)."""
+
+    def emit(self, record):
+        try:
+            text = record.getMessage()
+            if record.exc_info:
+                text += " | " + repr(record.exc_info[1])
+            db.x("INSERT INTO errors(at, source, text) VALUES(?,?,?)", now().isoformat(), record.name, text[:500])
+        except Exception:
+            pass
+
+
+_h = DbErrorHandler(level=logging.ERROR)
+logging.getLogger().addHandler(_h)
+
+
+@dp.error()
+async def on_error(event: ErrorEvent):
+    log.exception("handler error: %s", event.exception)
+    m = event.update.message
+    if m and m.text and m.text.startswith("/"):
+        try:
+            a = await m.answer("⚠️ Қате болды. Админ /status арқылы көре алады.")
+            service.track_ephemeral(a.chat.id, a.message_id, 3)
+        except Exception:
+            pass
+    return True
 
 
 GROUP = (F.chat.type.in_({"group", "supergroup"}), F.from_user, ~F.from_user.is_bot)
