@@ -69,6 +69,11 @@ for col in ("msg_id INTEGER", "ttl INTEGER DEFAULT 15"):
         conn.execute(f"ALTER TABLE notices ADD COLUMN {col}")
     except sqlite3.OperationalError:
         pass
+for col in ("draft TEXT", "draft_user INTEGER", "draft_at TEXT"):
+    try:
+        conn.execute(f"ALTER TABLE complaints ADD COLUMN {col}")
+    except sqlite3.OperationalError:
+        pass
 try:
     conn.execute("ALTER TABLE complaints ADD COLUMN notified_at TEXT")
 except sqlite3.OperationalError:

@@ -370,27 +370,31 @@ def find_complaint(chat_id: int, reply_to_id: int):
 
 async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
     """False - reply ешбір шағымға байланбады (шақырушы reply-сыз іздеуге көше алады)."""
-    c = find_complaint(msg.chat.id, msg.reply_to_message.message_id)
     text = msg.text or msg.caption
-    if not c:
-        cands = digest_candidates(msg.chat.id, msg.reply_to_message.message_id)
-        if not cands:
-            _decide(msg, None, "reply белгісіз хабарламаға (шағымға байланбады)")
-            return False
-        c = pick_from_digest(text or "", cands)
-        if not c:  # ортақ тізімге жауап, бірақ қай шағым екені белгісіз
-            if text and T.parse(text, T.RESOLUTION_LABELS):
-                return False  # шаблон болса, оқушы аты бойынша жалпы іздеу жұмыс істейді
-            if text and can_resolve(cands[0], msg.from_user):
-                thread = msg.message_thread_id if msg.is_topic_message else 0
-                queue_notice(f"{msg.chat.id}:{msg.message_id}", msg.chat.id, thread, msg.message_id,
-                             "❓ Қай шағым? Шағымның #нөмірін немесе оқушы атын жазыңыз, не шағым хабарламасына reply етіңіз.",
-                             ttl=10)
-                await flush(bot)
-            _decide(msg, None, "ортақ тізімге reply: қай шағым екені белгісіз")
-            return True
     thread = msg.message_thread_id if msg.is_topic_message else 0
     key = f"{msg.chat.id}:{msg.message_id}"
+    c = find_complaint(msg.chat.id, msg.reply_to_message.message_id)
+    if not c:
+        cands = digest_candidates(msg.chat.id, msg.reply_to_message.message_id)
+        if cands:
+            c = pick_from_digest(text or "", cands)
+            if not c:  # ортақ тізімге жауап, бірақ қай шағым екені белгісіз
+                if text and T.parse(text, T.RESOLUTION_LABELS):
+                    return False  # шаблон болса, оқушы аты бойынша жалпы іздеу жұмыс істейді
+                if text and can_resolve(cands[0], msg.from_user):
+                    queue_notice(key, msg.chat.id, thread, msg.message_id,
+                                 "❓ Қай шағым? Шағымның #нөмірін немесе оқушы атын жазыңыз, не шағым хабарламасына reply етіңіз.",
+                                 ttl=10)
+                    await flush(bot)
+                _decide(msg, None, "ортақ тізімге reply: қай шағым екені белгісіз")
+                return True
+        else:
+            # белгісіз/өшіп қалған хабарламаға reply: сол координатордың жүріп жатқан шешімін жалғастырамыз
+            c = None if (not text or T.parse(text, T.RESOLUTION_LABELS)) else \
+                active_draft_complaint(msg.from_user.id, msg.chat.id, thread)
+            if not c:
+                _decide(msg, None, "reply белгісіз хабарламаға (шағымға байланбады)")
+                return False
     if not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
         _decide(msg, c, f"еленбеді: шағым күйі «{c['status']}»" if text else "еленбеді: мәтін жоқ")
         # жабылған/өшірілген шағымға мәнді жауап жазылса - үнсіз қалмай, қысқа айтамыз
@@ -412,13 +416,14 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
             _decide(msg, c, "еленбеді: жауап беруші қызметкер")
             return True
         res = await _free_reply(text, c)
-        if res["kind"] == "progress":
+        has_fields = any(res.get(k) for k in ("satisfied", "justified", "stayed"))
+        if res["kind"] == "resolution" or (_get_draft(c) and has_fields):
+            _decide(msg, c, "шешім (шаблонсыз): жоба толтырылуда")
+            await _react(bot, msg, OFFER_REACTION)
+            await advance_draft(bot, msg, c, res, thread, key)
+        elif res["kind"] == "progress":
             _decide(msg, c, "процессте")
             await mark_progress(bot, msg, c, text)
-        elif res["kind"] == "resolution":
-            _decide(msg, c, "шешім сияқты (шаблонсыз)")
-            await _react(bot, msg, OFFER_REACTION)
-            await offer_resolution(bot, msg, c, text, res, thread, key)
         else:
             _decide(msg, c, "басқа (шешім де, процесс те емес)")
             if not edited and len(text.strip()) >= 80:
@@ -428,6 +433,21 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
     _decide(msg, c, "шешім шаблоны")
     await _resolve(bot, msg, c, text, thread, key)
     return True
+
+
+async def process_followup(bot: Bot, msg):
+    """Reply-сыз қысқа толықтыру («Оқушы риза, курста қалды»): тек сол координаторда шешім жобасы жүріп жатса."""
+    text = msg.text or msg.caption
+    if not text or len(text.strip()) < 4:
+        return
+    thread = msg.message_thread_id if msg.is_topic_message else 0
+    c = active_draft_complaint(msg.from_user.id, msg.chat.id, thread)
+    if not c:
+        return
+    res = await ai.classify_reply(text, c["text"])
+    if res and (res["kind"] == "resolution" or any(res.get(k) for k in ("satisfied", "justified", "stayed"))):
+        _decide(msg, c, "толықтыру (reply-сыз): жоба жаңартылды")
+        await advance_draft(bot, msg, c, res, thread, f"{msg.chat.id}:{msg.message_id}")
 
 
 async def _free_reply(text: str, c) -> dict:
@@ -443,21 +463,126 @@ async def _free_reply(text: str, c) -> dict:
     return res
 
 
-async def offer_resolution(bot: Bot, msg, c, text: str, ext: dict, thread: int, key: str):
-    """Координатор шешімді шаблонсыз жазды: бәрі анық болса жабамыз, әйтпесе дайын толтырылған шаблон ұсынамыз."""
+# ---------------------------------------------------------------- шешім жобасы (шаблонсыз жауап + түймелер)
+DRAFT_FIELDS = [("justified", "Мәселе шындыққа негізделген бе?", T.JUSTIFIED),
+                ("satisfied", "Оқушы риза ма?", T.SATISFIED),
+                ("stayed", "Оқушы курста қалды ма?", T.STAYED)]
+DRAFT_TTL_HOURS = 6
+
+
+def _get_draft(c) -> dict:
+    return json.loads(c["draft"] or "{}")
+
+
+def _put_draft(cid: int, d: dict, user_id: int):
+    db.x("UPDATE complaints SET draft=?, draft_user=?, draft_at=? WHERE id=?",
+         json.dumps(d, ensure_ascii=False), user_id, iso(now()), cid)
+
+
+def _missing(d: dict) -> list:
+    return [f for f, _, _ in DRAFT_FIELDS if not d.get(f)]
+
+
+def active_draft_complaint(user_id: int, chat_id: int, thread: int):
+    """Осы координатордың осы topic-те жүріп жатқан (6 сағ ішінде) жалғыз шешім жобасы."""
+    rows = [c for c in db.q("SELECT * FROM complaints WHERE status='open' AND draft IS NOT NULL AND draft_user=? "
+                            "AND target_chat=? AND target_thread=?", user_id, chat_id, thread)
+            if now() - parse_dt(c["draft_at"]) < timedelta(hours=DRAFT_TTL_HOURS)]
+    return rows[0] if len(rows) == 1 else None
+
+
+def _question_kb(cid: int, field: str):
+    opts = next(o for f, _, o in DRAFT_FIELDS if f == field)
+    rows, row = [], []
+    for i, label in enumerate(opts):
+        row.append(InlineKeyboardButton(text=label, callback_data=f"dr:{cid}:{field}:{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ask_next(bot: Bot, c, d: dict, field: str, reply_to: int | None):
+    """Жетпейтін бір ғана сұрақ, түймелермен. Алдыңғы сұрақ хабарламасы болса - соны жаңартады."""
+    question = next(q for f, q, _ in DRAFT_FIELDS if f == field)
+    text = f"❓ <b>#{c['id']}</b> · {html.escape(question)}"
+    kb = _question_kb(c["id"], field)
+    prompt = d.get("prompt")
+    if prompt:
+        try:
+            await bot.edit_message_text(text, chat_id=c["target_chat"], message_id=prompt, parse_mode="HTML",
+                                        reply_markup=kb)
+            return
+        except Exception:
+            pass
+    m = await send(bot, c["target_chat"], c["target_thread"], text, c["id"],
+                   reply_to=reply_to or c["target_msg"], markup=kb)
+    d["prompt"] = m.message_id
+    _put_draft(c["id"], d, c["draft_user"] or 0)
+
+
+async def _finish_draft(bot: Bot, c, d: dict, by: str) -> list:
     student = json.loads(c["parsed"] or "{}").get("student_name") or ""
-    tpl = T.synth_resolution(student, ext, text)
-    _, errors, _ = T.validate_resolution(tpl, student)
-    if not errors:
-        await _resolve(bot, msg, c, tpl, thread, key)
+    tpl = T.synth_resolution(student, d, d.get("solution") or c["text"])
+    final, errors, _ = T.validate_resolution(tpl, student)
+    if errors:
+        return errors
+    if d.get("prompt"):
+        try:
+            await bot.edit_message_text(f"✅ <b>#{c['id']}</b> шешім толық, шағым жабылды", chat_id=c["target_chat"],
+                                        message_id=d["prompt"], parse_mode="HTML", reply_markup=None)
+        except Exception:
+            pass
+    db.x("INSERT INTO replies(complaint_id,user_id,user_name,text,kind,created_at) VALUES(?,?,?,?,?,?)",
+         c["id"], c["draft_user"] or 0, by, tpl, "final", iso(now()))
+    db.x("UPDATE complaints SET draft=NULL, draft_user=NULL, draft_at=NULL WHERE id=?", c["id"])
+    await close_complaint(bot, c["id"], by, final)
+    return []
+
+
+async def advance_draft(bot: Bot, msg, c, ext: dict, thread: int, key: str):
+    """Шаблонсыз шешімнен жоба жинаймыз: бар өрістер алынады, жетпейтінін түймемен сұраймыз, бәрі болса жабамыз."""
+    d = _get_draft(c)
+    for k in ("justified", "satisfied", "stayed"):
+        if ext.get(k):
+            d[k] = ext[k]
+    if ext.get("solution") and not d.get("solution"):
+        d["solution"] = ext["solution"]
+    if not d.get("solution"):
+        d["solution"] = (msg.text or msg.caption or "").strip()
+    _put_draft(c["id"], d, msg.from_user.id)
+    c = db.q1("SELECT * FROM complaints WHERE id=?", c["id"])
+    missing = _missing(d)
+    if not missing:
+        errors = await _finish_draft(bot, c, d, msg.from_user.full_name)
+        if errors:
+            queue_notice(key, msg.chat.id, thread, msg.message_id, errors_text(errors, "resolution"))
+            await flush(bot)
+        else:
+            await _react(bot, msg, DONE_REACTION)
         return
-    missing = [name for name, k in (("Негізделген бе?", "justified"), ("Риза ма?", "satisfied"),
-                                    ("Қалды ма?", "stayed")) if not ext.get(k)]
-    note = ("Жетпейді: " + ", ".join(missing)) if missing else "; ".join(errors)
-    queue_notice(key, msg.chat.id, thread, msg.message_id,
-                 f"📝 Шешім сияқты. Жабу үшін толықтырып жіберіңіз:\n<code>{html.escape(tpl)}</code>\n{html.escape(note)}",
-                 ttl=120)
-    await flush(bot)
+    await _ask_next(bot, c, d, missing[0], msg.message_id)
+
+
+async def apply_draft_choice(bot: Bot, c, field: str, idx: int, user) -> str:
+    """Түйме басылды: жобаға жауап жазылады; бәрі толса - шағым жабылады, әйтпесе келесі сұрақ."""
+    opts = next((o for f, _, o in DRAFT_FIELDS if f == field), None)
+    if opts is None or not 0 <= idx < len(opts):
+        return "Қате түйме"
+    d = _get_draft(c)
+    d[field] = opts[idx]
+    if not d.get("solution"):
+        d["solution"] = c["text"]
+    _put_draft(c["id"], d, user.id)
+    c = db.q1("SELECT * FROM complaints WHERE id=?", c["id"])
+    missing = _missing(d)
+    if not missing:
+        errors = await _finish_draft(bot, c, d, user.full_name)
+        return ("❌ " + "; ".join(errors)) if errors else "✅ Шағым жабылды"
+    await _ask_next(bot, c, d, missing[0], None)
+    return "Қабылданды"
 
 
 def _decide(msg, c, outcome: str):

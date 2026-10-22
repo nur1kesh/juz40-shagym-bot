@@ -244,6 +244,18 @@ async def cb_pick(cb: CallbackQuery, bot: Bot):
     await cb.answer(result, show_alert=not result.startswith("✅"))
 
 
+@dp.callback_query(F.data.startswith("dr:"))
+async def cb_draft(cb: CallbackQuery, bot: Bot):
+    _, cid, field, idx = cb.data.split(":")
+    c = db.q1("SELECT * FROM complaints WHERE id=?", int(cid))
+    if not c or c["status"] != "open":
+        return await cb.answer("Бұл шағым жабылған", show_alert=True)
+    if not service.can_resolve(c, cb.from_user):
+        return await cb.answer("Тек жауапты координатор/супервайзер", show_alert=True)
+    result = await service.apply_draft_choice(bot, c, field, int(idx), cb.from_user)
+    await cb.answer(result)
+
+
 @dp.callback_query(F.data == "tpl:res")
 async def cb_template(cb: CallbackQuery):
     m = await cb.message.answer(T.RESOLUTION_COMPACT, parse_mode="HTML")
@@ -291,7 +303,10 @@ async def handle(msg: Message, bot: Bot, edited: bool):
                 await service.process_media_only(bot, msg)
         elif role != "external_hate" and service.is_loose_resolution(msg.text or msg.caption or ""):
             await service.process_loose_resolution(bot, msg, edited)
-        elif not people.is_roster_user(msg.from_user):
+        elif people.is_roster_user(msg.from_user):
+            if role != "external_hate":
+                await service.process_followup(bot, msg)   # шешім жобасын reply-сыз толықтыру
+        else:
             await service.process_complaint(bot, msg, role, edited)
     except Exception:
         log.exception("handler error")

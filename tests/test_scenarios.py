@@ -1027,45 +1027,104 @@ FREE_RESOLUTION = ("Жауапты коорд оқушымен байланыс�
                    "Оқушы шешімге риза")
 
 
-def test_free_text_resolution_is_not_marked_as_progress_and_gets_a_prefilled_template(env, monkeypatch):
-    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
-        "kind": "resolution", "solution": "Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады",
-        "satisfied": "Иә", "justified": None, "stayed": None}))
+def _ai_resolution(**kw):
+    base = {"kind": "resolution", "solution": "Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады",
+            "satisfied": None, "justified": None, "stayed": None}
+    base.update(kw)
+    return AsyncMock(return_value=base)
+
+
+class CbMsgDraft:
+    def __init__(self, chat_id, mid):
+        self.chat, self.message_id = NS(id=chat_id), mid
+
+
+def tap(env, cid, field, label_idx, user=None):
+    cb = NS(data=f"dr:{cid}:{field}:{label_idx}", from_user=user or COORD(), message=CbMsgDraft(SMART[0], 1),
+            answer=AsyncMock())
+    run(bm.cb_draft(cb, env.bot))
+    return cb
+
+
+def test_free_text_resolution_is_not_progress_and_asks_only_what_is_missing_with_buttons(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", _ai_resolution(satisfied="Иә"))
     post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
     n_react = len(env.bot.reactions)
     post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
     c = C()[0]
     assert c["status"] == "open" and c["progress_at"] is None            # «процессте» деп белгіленбейді
     assert len(env.bot.reactions) == n_react + 1 and env.bot.reactions[-1][2][0].emoji == "👌"   # ✍ емес, 👌
-    t = env.bot.sent[-1].text
-    assert "Шешім сияқты" in t and "Айтжанова Айлин" in t and "риза ма? Иә" in t
-    assert "Жетпейді: Негізделген бе?, Қалды ма?" in t
-    assert "<code>" in t
+    q = env.bot.sent[-1]
+    assert "негізделген" in q.text and "риза" not in q.text              # риза ма - мәтіннен алынды, сұралмайды
+    buttons = [b.text for r in q.kb.inline_keyboard for b in r]
+    assert buttons == ["Негізделген", "Жартылай негізделген", "Негізделмеген", "КБ бермеді"]
 
 
-def test_prefilled_template_can_be_completed_by_reply_to_the_bot_message(env, monkeypatch):
-    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
-        "kind": "resolution", "solution": "Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады",
-        "satisfied": "Иә", "justified": None, "stayed": None}))
+def test_buttons_complete_the_resolution_and_close_the_complaint(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", _ai_resolution(satisfied="Иә"))
     post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
     post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
-    offer = env.bot.sent[-1]
-    done = ("Оқушы аты-жөні: Айтжанова Айлин\nМәселенің шешімі: Оқушымен байланысты, куратор рейтинг шыққан соң ауыстырылады\n"
-            "Мәселе шындыққа негізделген бе? Негізделген\nОқушы риза ма? Иә\nОқушы курста қалды ма? Иә")
-    post(env, COORD(), SMART, done, reply=offer.id)                       # боттың ұсынысына reply
+    cid = C()[0]["id"]
+    tap(env, cid, "justified", 0)                                         # Негізделген
+    assert C()[0]["status"] == "open" and env.bot.edited[-1][2].count("курста") == 1     # келесі сұрақ сол хабарлама ішінде
+    tap(env, cid, "stayed", 0)                                            # Иә
+    c = C()[0]
+    f = json.loads(c["final"])
+    assert c["status"] == "resolved" and (f["justified"], f["satisfied"], f["stayed"]) == ("Негізделген", "Иә", "Иә")
+    assert "шешім толық" in env.bot.edited[-1][2]
+
+
+def test_only_a_resolver_can_tap_the_buttons(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", _ai_resolution(satisfied="Иә"))
+    tech = TECH()
+    post(env, tech, SMART, complaint_text())
+    post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
+    cb = tap(env, C()[0]["id"], "justified", 0, user=tech)               # шағымды жазған қызметкер
+    cb.answer.assert_awaited_with("Тек жауапты координатор/супервайзер", show_alert=True)
+    assert "justified" not in json.loads(C()[0]["draft"])
+
+
+def test_short_followup_reply_and_unmapped_reply_continue_the_same_draft(env, monkeypatch):
+    """Шын чат: алдымен шешім, содан кейін «Оқушы риза, курста қалды» (өшіп қалған хабарламаға reply)."""
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(side_effect=[
+        {"kind": "resolution", "solution": "Жеке сөйлесу жүргізілді, кураторға ескертілді және куратор ауыстырылды",
+         "satisfied": None, "justified": "Негізделген", "stayed": None},
+        {"kind": "other", "solution": None, "satisfied": "Иә", "justified": None, "stayed": "Иә"}]))
+    post(env, TECH(), SMART, complaint_text(student="Жәнібекқызы Аяжан"))
+    coord = COORD()
+    post(env, coord, SMART, "Жәнібекқызы Аяжамен жеке сөйлесу жүргізілді, дәлелдер қабылданды. Кураторға ескертілді "
+                            "және оқушының кураторын ауыстырдық", reply=env.bot.sent[0].id)
+    assert C()[0]["status"] == "open" and "риза" in env.bot.sent[-1].text      # негізделген мәтіннен алынды -> риза ма сұралады
+    post(env, coord, SMART, "Оқушы риза, курста қалды", reply=999999)         # өшіп қалған/белгісіз хабарламаға reply
+    c = C()[0]
+    f = json.loads(c["final"])
+    assert c["status"] == "resolved" and (f["justified"], f["satisfied"], f["stayed"]) == ("Негізделген", "Иә", "Иә")
+
+
+def test_followup_without_any_reply_works_for_the_same_coordinator_only(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(side_effect=[
+        {"kind": "resolution", "solution": "Оқушымен сөйлестік, куратор ауыстырылды", "satisfied": None,
+         "justified": "Негізделген", "stayed": None},
+        {"kind": "other", "solution": None, "satisfied": "Иә", "justified": None, "stayed": "Иә"}]))
+    post(env, TECH(), SMART, complaint_text())
+    coord = COORD()
+    post(env, coord, SMART, "Оқушымен сөйлестік, куратор ауыстырылды, шағым дұрыс болды", reply=env.bot.sent[0].id)
+    other = U(77, "Басқа Координатор", "somebody77")
+    db.x("INSERT OR REPLACE INTO users(user_id, username, full_name) VALUES(?,?,?)", 77, "somebody77", other.full_name)
+    post(env, other, SMART, "Оқушы риза, курста қалды")                         # басқа адам: жоба жалғаспайды
+    assert C()[0]["status"] == "open"
+    post(env, coord, SMART, "Оқушы риза, курста қалды")                          # reply-сыз, сол координатор
     assert C()[0]["status"] == "resolved"
 
 
-def test_free_text_resolution_with_all_facts_closes_automatically(env, monkeypatch):
-    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
-        "kind": "resolution", "solution": "Оқушымен байланысқа шықтық, куратор ауыстырылды, оқушы курста қалады",
-        "satisfied": "Иә", "justified": "Негізделген", "stayed": "Иә"}))
-    post(env, TECH(), SMART, complaint_text(student="Айтжанова Айлин"))
-    post(env, COORD(), SMART, FREE_RESOLUTION + ", курста қалады, шағым дұрыс болды", reply=env.bot.sent[0].id)
-    c = C()[0]
-    assert c["status"] == "resolved"
-    f = json.loads(c["final"])
-    assert (f["justified"], f["satisfied"], f["stayed"]) == ("Негізделген", "Иә", "Иә")
+def test_draft_expires_after_six_hours(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", _ai_resolution(satisfied="Иә"))
+    post(env, TECH(), SMART, complaint_text())
+    coord = COORD()
+    post(env, coord, SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
+    assert service.active_draft_complaint(coord.id, SMART[0], SMART[1]) is not None
+    env.clock.add(hours=7)
+    assert service.active_draft_complaint(coord.id, SMART[0], SMART[1]) is None
 
 
 def test_classify_reply_failure_falls_back_to_keywords_only(env, monkeypatch):
@@ -1352,11 +1411,10 @@ def test_visible_reactions_for_each_outcome(env, monkeypatch):
     assert env.bot.reactions[-1][2][0].emoji == "👍" and C()[0]["status"] == "resolved"
 
 
-def test_long_free_text_resolution_with_a_photo_caption_gets_reaction_and_prefilled_template(env, monkeypatch):
+def test_long_free_text_resolution_with_a_photo_caption_gets_reaction_and_question(env, monkeypatch):
     """Шын чат: координатор скриншот + caption (шаблонсыз шешім) жіберді, бот үнсіз қалды."""
-    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
-        "kind": "resolution", "solution": "Куратор мен оқушы сөйлесті, куратор 5-30 минутта жауап береді",
-        "satisfied": "Иә", "justified": None, "stayed": None}))
+    monkeypatch.setattr(service.ai, "classify_reply", _ai_resolution(
+        solution="Куратор мен оқушы сөйлесті, куратор 5-30 минутта жауап береді", satisfied="Иә"))
     post(env, TECH(), SMART, complaint_text(student="Ламья Жамалова"))
     caption = ("Қайырлы кеш\nШешімі: Негізі куратор 5-30 минут ішінде үнемі уақытылы жауап береді. "
                "Куратор мен оқушы сөйлесті, оқушы шешімге риза")
@@ -1364,8 +1422,9 @@ def test_long_free_text_resolution_with_a_photo_caption_gets_reaction_and_prefil
     m.photo = [NS(file_id="x")]
     run(bm.handle(m, env.bot, False))
     assert env.bot.reactions[-1][2][0].emoji == "👌"
-    assert "Шешім сияқты" in env.bot.sent[-1].text and "Ламья Жамалова" in env.bot.sent[-1].text
-    assert db.q1("SELECT COUNT(*) n FROM ephemeral")["n"] == 1 and db.q1("SELECT ttl FROM notices ORDER BY id DESC")["ttl"] == 120
+    q = env.bot.sent[-1]
+    assert "негізделген" in q.text and q.kb is not None                  # бот үнсіз қалмады, түймелі сұрақ бар
+    assert db.q1("SELECT COUNT(*) n FROM ephemeral")["n"] == 0            # сұрақ өздігінен өшпейді
 
 
 def test_reply_to_closed_or_deleted_complaint_is_explained_not_ignored(env):
