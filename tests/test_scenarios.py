@@ -82,7 +82,7 @@ class FakeBot:
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     for t in ("bindings", "users", "complaints", "replies", "bot_msgs", "notices", "pending_res",
-              "media_msgs", "media_groups", "ephemeral", "digest_msgs", "deletions", "errors"):
+              "media_msgs", "media_groups", "ephemeral", "digest_msgs", "deletions", "errors", "decisions"):
         db.x(f"DELETE FROM {t}")
     db.bind("smart_hate", *SMART)
     db.bind("junior_hate", *JUNIOR)
@@ -1036,7 +1036,7 @@ def test_free_text_resolution_is_not_marked_as_progress_and_gets_a_prefilled_tem
     post(env, COORD(), SMART, FREE_RESOLUTION, reply=env.bot.sent[0].id)
     c = C()[0]
     assert c["status"] == "open" and c["progress_at"] is None            # «процессте» деп белгіленбейді
-    assert len(env.bot.reactions) == n_react                              # ✍ жоқ
+    assert len(env.bot.reactions) == n_react + 1 and env.bot.reactions[-1][2][0].emoji == "👌"   # ✍ емес, 👌
     t = env.bot.sent[-1].text
     assert "Шешім сияқты" in t and "Айтжанова Айлин" in t and "риза ма? Иә" in t
     assert "Жетпейді: Негізделген бе?, Қалды ма?" in t
@@ -1340,3 +1340,47 @@ def test_errors_are_recorded_for_status(env):
     logging.getLogger("bot.test").error("сынақ қатесі")
     assert any("сынақ қатесі" in e["text"] for e in db.q("SELECT * FROM errors"))
     assert "сынақ қатесі" in service.fmt_status()
+
+
+# ===================================================================== жауапқа бот реакциясы және «неге үндемеді?» журналы
+def test_visible_reactions_for_each_outcome(env, monkeypatch):
+    post(env, TECH(), SMART, complaint_text())
+    notify = env.bot.sent[0]
+    post(env, COORD(), SMART, "в процессе", reply=notify.id)
+    assert env.bot.reactions[-1][2][0].emoji == "✍"
+    post(env, COORD(), SMART, resolution_text(), reply=notify.id)
+    assert env.bot.reactions[-1][2][0].emoji == "👍" and C()[0]["status"] == "resolved"
+
+
+def test_long_free_text_resolution_with_a_photo_caption_gets_reaction_and_prefilled_template(env, monkeypatch):
+    """Шын чат: координатор скриншот + caption (шаблонсыз шешім) жіберді, бот үнсіз қалды."""
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": "Куратор мен оқушы сөйлесті, куратор 5-30 минутта жауап береді",
+        "satisfied": "Иә", "justified": None, "stayed": None}))
+    post(env, TECH(), SMART, complaint_text(student="Ламья Жамалова"))
+    caption = ("Қайырлы кеш\nШешімі: Негізі куратор 5-30 минут ішінде үнемі уақытылы жауап береді. "
+               "Куратор мен оқушы сөйлесті, оқушы шешімге риза")
+    m = M(COORD(), SMART, caption=caption, ctype="photo", reply=env.bot.sent[0].id)
+    m.photo = [NS(file_id="x")]
+    run(bm.handle(m, env.bot, False))
+    assert env.bot.reactions[-1][2][0].emoji == "👌"
+    assert "Шешім сияқты" in env.bot.sent[-1].text and "Ламья Жамалова" in env.bot.sent[-1].text
+    assert db.q1("SELECT COUNT(*) n FROM ephemeral")["n"] == 1 and db.q1("SELECT ttl FROM notices ORDER BY id DESC")["ttl"] == 120
+
+
+def test_reply_to_closed_or_deleted_complaint_is_explained_not_ignored(env):
+    m = post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)            # жабылды
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)            # қайта жауап
+    assert "жабылған" in env.bot.sent[-1].text
+    db.update("complaints", C()[0]["id"], status="deleted")
+    post(env, COORD(), SMART, "в процессе, шешемін", reply=m.message_id)
+    assert "өшірілген" in env.bot.sent[-1].text
+
+
+def test_status_lists_recent_decisions(env):
+    post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, "в процессе", reply=env.bot.sent[0].id)
+    post(env, COORD(), SMART, "ертең жазамын", reply=env.bot.sent[0].id)
+    st = service.fmt_status()
+    assert "Соңғы жауаптарға бот шешімі" in st and "процессте" in st

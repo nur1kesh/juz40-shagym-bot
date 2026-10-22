@@ -21,7 +21,9 @@ PROGRESS_WORDS = ("процесс", "жұмыс істеп", "жумыс ист�
                   "қабылданды", "қабылдадық", "қабылдадым", "кб береміз", "кб беремін", "кері байланыс береміз",
                   "кері байланыс беремін", "жауап береміз", "жауап беремін", "хабарласамыз", "байланысамыз",
                   "принято", "приняли", "принял", "дадим обратную связь", "сообщим", "ответим")
-PROGRESS_REACTION = "✍"
+PROGRESS_REACTION = "✍"      # процессте
+OFFER_REACTION = "👌"         # шешім сияқты қабылданды, шаблонды толықтыру керек
+DONE_REACTION = "👍"          # шешім қабылданып, шағым жабылды
 SOLUTION_AI_CHECK_BELOW = 80  # осыдан қысқа шешімді ғана OpenAI «мазмұнды ма» деп тексереді
 SEND_GAP = 0.3        # Telegram лимитінен (≈20 хабарлама/мин топқа) қашу үшін хабарламалар арасы, сек
 RETRY_BACKOFF_MIN = 5  # жіберу сәтсіз болса, қайталау алдындағы үзіліс
@@ -373,6 +375,7 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
     if not c:
         cands = digest_candidates(msg.chat.id, msg.reply_to_message.message_id)
         if not cands:
+            _decide(msg, None, "reply белгісіз хабарламаға (шағымға байланбады)")
             return False
         c = pick_from_digest(text or "", cands)
         if not c:  # ортақ тізімге жауап, бірақ қай шағым екені белгісіз
@@ -384,28 +387,45 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
                              "❓ Қай шағым? Шағымның #нөмірін немесе оқушы атын жазыңыз, не шағым хабарламасына reply етіңіз.",
                              ttl=10)
                 await flush(bot)
+            _decide(msg, None, "ортақ тізімге reply: қай шағым екені белгісіз")
             return True
-    if not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
-        return True
     thread = msg.message_thread_id if msg.is_topic_message else 0
     key = f"{msg.chat.id}:{msg.message_id}"
+    if not text or c["status"] not in ("open", "new") or msg.chat.id != c["target_chat"]:
+        _decide(msg, c, f"еленбеді: шағым күйі «{c['status']}»" if text else "еленбеді: мәтін жоқ")
+        # жабылған/өшірілген шағымға мәнді жауап жазылса - үнсіз қалмай, қысқа айтамыз
+        if (text and c["status"] in ("resolved", "deleted") and msg.chat.id == c["target_chat"]
+                and can_resolve(c, msg.from_user)
+                and (T.parse(text, T.RESOLUTION_LABELS) or is_progress_note(text) or len(text.strip()) >= 60)):
+            queue_notice(key, msg.chat.id, thread, msg.message_id,
+                         f"ℹ️ #{c['id']} шағым {'өшірілген' if c['status'] == 'deleted' else 'жабылған'}.", ttl=5)
+            await flush(bot)
+        return True
     labels = T.parse(text, T.RESOLUTION_LABELS)
     if labels and not can_resolve(c, msg.from_user):
         deny_notice(msg, thread, key)
+        _decide(msg, c, "рұқсат жоқ (шағымды жазған/қызметкер)")
         await flush(bot)
         return True
     if not labels:
         if not can_resolve(c, msg.from_user):
+            _decide(msg, c, "еленбеді: жауап беруші қызметкер")
             return True
         res = await _free_reply(text, c)
         if res["kind"] == "progress":
+            _decide(msg, c, "процессте")
             await mark_progress(bot, msg, c, text)
         elif res["kind"] == "resolution":
+            _decide(msg, c, "шешім сияқты (шаблонсыз)")
+            await _react(bot, msg, OFFER_REACTION)
             await offer_resolution(bot, msg, c, text, res, thread, key)
-        elif not edited and len(text.strip()) >= 80:
-            queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
-            await flush(bot)
+        else:
+            _decide(msg, c, "басқа (шешім де, процесс те емес)")
+            if not edited and len(text.strip()) >= 80:
+                queue_notice(key, msg.chat.id, thread, msg.message_id, "📝 Шешім шаблонсыз. Шаблон: /shesim")
+                await flush(bot)
         return True
+    _decide(msg, c, "шешім шаблоны")
     await _resolve(bot, msg, c, text, thread, key)
     return True
 
@@ -436,8 +456,25 @@ async def offer_resolution(bot: Bot, msg, c, text: str, ext: dict, thread: int, 
     note = ("Жетпейді: " + ", ".join(missing)) if missing else "; ".join(errors)
     queue_notice(key, msg.chat.id, thread, msg.message_id,
                  f"📝 Шешім сияқты. Жабу үшін толықтырып жіберіңіз:\n<code>{html.escape(tpl)}</code>\n{html.escape(note)}",
-                 ttl=30)
+                 ttl=120)
     await flush(bot)
+
+
+def _decide(msg, c, outcome: str):
+    """Боттың жауапқа қатысты шешімі журналға жазылады: «неге үндемеді?» деген сұраққа /status жауап береді."""
+    try:
+        db.x("INSERT INTO decisions(at, chat_id, msg_id, complaint_id, who, outcome) VALUES(?,?,?,?,?,?)",
+             iso(now()), msg.chat.id, msg.message_id, c["id"] if c else None,
+             (getattr(msg.from_user, "full_name", "") or "")[:40], outcome)
+    except Exception:
+        log.exception("decision log failed")
+
+
+async def _react(bot: Bot, msg, emoji: str):
+    try:
+        await bot.set_message_reaction(msg.chat.id, msg.message_id, [ReactionTypeEmoji(emoji=emoji)])
+    except Exception:
+        pass
 
 
 def digest_candidates(chat_id: int, msg_id: int) -> list:
@@ -492,6 +529,7 @@ async def _resolve(bot: Bot, msg, c, text: str, thread: int, key: str):
     await clear_notices(bot, key)
     db.x("INSERT INTO replies(complaint_id,user_id,user_name,text,kind,created_at) VALUES(?,?,?,?,?,?)",
          c["id"], msg.from_user.id, msg.from_user.full_name, text, "final", iso(now()))
+    await _react(bot, msg, DONE_REACTION)
     await close_complaint(bot, c["id"], msg.from_user.full_name, final)
 
 
@@ -585,6 +623,11 @@ def fmt_status() -> str:
     lines.append("Боттың соңғы өшірулері:" + ("" if dels else " жоқ"))
     for d in dels:
         lines.append(f"• {parse_dt(d['at']):%d.%m %H:%M} · #{d['msg_id']} · {d['reason']}")
+    decs = db.q("SELECT * FROM decisions ORDER BY id DESC LIMIT 6")
+    lines.append("Соңғы жауаптарға бот шешімі:" + ("" if decs else " жоқ"))
+    for d in decs:
+        lines.append(f"• {parse_dt(d['at']):%d.%m %H:%M} · {d['who']} · "
+                     f"{'#' + str(d['complaint_id']) if d['complaint_id'] else '-'} · {d['outcome']}")
     errs = db.q("SELECT * FROM errors ORDER BY id DESC LIMIT 5")
     lines.append("Соңғы қателер:" + ("" if errs else " жоқ"))
     for e in errs:

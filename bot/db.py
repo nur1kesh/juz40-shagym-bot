@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS deletions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, chat_id INTEGER, msg_id INTEGER, reason TEXT);
 CREATE TABLE IF NOT EXISTS errors(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, source TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS decisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, chat_id INTEGER, msg_id INTEGER, complaint_id INTEGER,
+  who TEXT, outcome TEXT);
 CREATE INDEX IF NOT EXISTS ix_c_status ON complaints(status);
 """)
 for col in ("review_needed", "review_asked"):
