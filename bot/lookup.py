@@ -85,14 +85,11 @@ def needs_stream(code: dict) -> bool:
 
 
 def block(code: dict) -> str:
-    """Бір код үшін: 👥 координаторлар және 🧑‍🏫 супервайзер (@-тегтермен)."""
+    """Бір код үшін: 👥 тек координаторлар (@-тегтермен), супервайзерсіз."""
     program = code["program"] or "smart"
-    coords, sups, _ = responsible_for(program, [code["subject"]], code["stream"])
-    lines = ["👥 <b>{}</b> · {}".format(
-        html.escape(label(code)), ", ".join(people.mention(p) for p in coords) or "координатор тізімде жоқ")]
-    if sups:
-        lines.append("🧑‍🏫 " + ", ".join(people.mention(p) for p in sups))
-    return "\n".join(lines)
+    coords, _, _ = responsible_for(program, [code["subject"]], code["stream"])
+    return "👥 <b>{}</b> · {}".format(
+        html.escape(label(code)), ", ".join(people.mention(p) for p in coords) or "координатор тізімде жоқ")
 
 
 def render(codes: list[dict]) -> tuple[str | None, list[dict]]:

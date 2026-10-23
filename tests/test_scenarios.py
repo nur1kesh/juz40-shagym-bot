@@ -1706,7 +1706,8 @@ def test_hashtag_in_a_tag_topic_replies_to_the_message_with_coordinators_and_sup
     msg = post(env, SELLER(), TAGT, "Қайырлы күн, клиент курсқа кіре алмайды, 87076665544 #инфо-21")
     r = env.bot.sent[-1]
     assert r.reply_to == msg.message_id and (r.chat, r.thread) == TAGT
-    assert "ИНФО-21" in r.text and "@niyazbekshugyla" in r.text and "@amina_info140" in r.text
+    assert "ИНФО-21" in r.text and "@niyazbekshugyla" in r.text
+    assert "@amina_info140" not in r.text and "🧑‍🏫" not in r.text           # супервайзер белгіленбейді
     assert C() == []                                                         # шағым ретінде тіркелмейді
 
 
@@ -1755,14 +1756,14 @@ def test_junior_hashtag_tags_the_junior_team(tagenv):
     env = tagenv
     post(env, SELLER(), TAGT, "Оқушы 9 сынып #junior-мат")
     t = env.bot.sent[-1].text
-    assert "JUNIOR МАТ" in t and "@arystanbekova7" in t and "@maqzhan1" in t and "@bayashkarr" not in t
+    assert "JUNIOR МАТ" in t and "@arystanbekova7" in t and "@maqzhan1" not in t and "@bayashkarr" not in t
 
 
 def test_stream_41_has_no_coordinators_yet_and_shows_the_supervisor(tagenv):
     env = tagenv
     post(env, SELLER(), TAGT, "#гео-41")
     t = env.bot.sent[-1].text
-    assert "координатор тізімде жоқ" in t and "@Meyrambekovich" in t
+    assert "координатор тізімде жоқ" in t and "@" not in t                   # ешкім белгіленбейді
 
 
 def test_people_without_username_are_shown_by_name(tagenv):
