@@ -19,7 +19,7 @@ import bot.main as bm  # noqa: E402
 REAL_WINDOW = config.in_work_window
 from bot import ai as _ai_mod  # noqa: E402
 REAL_CLASSIFY = _ai_mod.classify
-SMART, JUNIOR, EXT = (-100, 5), (-100, 6), (-200, 9)
+SMART, JUNIOR, EXT, SUPPORT = (-100, 5), (-100, 6), (-200, 9), (-200, 11)
 
 
 def run(coro):
@@ -87,6 +87,7 @@ def env(monkeypatch):
     db.bind("smart_hate", *SMART)
     db.bind("junior_hate", *JUNIOR)
     db.bind("external_hate", *EXT)
+    db.bind("support_check", *SUPPORT)
     clock = Clock(datetime(2026, 10, 14, 12, 0, tzinfo=config.TZ))  # сәрсенбі
     monkeypatch.setattr(config, "now", clock.now)
     monkeypatch.setattr(service, "SEND_GAP", 0)
@@ -1584,3 +1585,80 @@ def test_update_corrects_a_resolved_complaint_for_the_excel(cbot):
     import openpyxl
     ws = openpyxl.load_workbook(io.BytesIO(exporter.build()))["ТЕХ МЕНЕДЖЕР"]
     assert ws[2][5].value == "Куратор ауыстыру"
+
+
+# ===================================================================== ҚОЛДАУ topic-і: тек шаблон тексеру
+SELLER = lambda: U(31, "Аманжолов Рамазан | JUZ40 СЫРТҚЫ САТУ МЕНЕДЖЕРІ")  # noqa: E731
+
+
+@pytest.mark.parametrize("text,has_media,errors", [
+    ("Қайырлы күн, +77476056363 Осы ата-анамен байланысып жіберсеңіздер", False, []),
+    ("Телефон нөмірі: 87076665544\nМәселенің сипаттамасы: оқушы платформаға кіре алмай жатыр", False, []),
+    ("+7 701 555 44 33 курс ашылмайды, төлем өтті", False, []),
+    ("Қайырлы күн", False, ["телефон нөмірі жоқ", "мәселенің сипаттамасы жоқ немесе тым қысқа"]),
+    ("87076665544", False, ["мәселенің сипаттамасы жоқ немесе тым қысқа"]),
+    ("Оқушы платформаға кіре алмай жатыр, көмектесіңіздерші", False, ["телефон нөмірі жоқ"]),
+    ("87076665544 қолдауға жазған, жауап бермеді, көмектесіңіз", False, ["қолдауға жазған болса — чат скринін қосыңыз"]),
+    ("87076665544 қолдауға жазған, жауап бермеді, көмектесіңіз", True, []),
+])
+def test_validate_support(text, has_media, errors):
+    assert T.validate_support(text, has_media) == errors
+
+
+def test_support_topic_only_checks_the_template_and_creates_nothing(env):
+    seller = SELLER()
+    post(env, seller, SUPPORT, "Қайырлы күн, +77476056363 Осы ата-анамен байланысып жіберсеңіздер")
+    assert env.bot.sent == [] and C() == []                                # дұрыс шаблон: үнсіз, ештеңе тіркелмейді
+    post(env, seller, SUPPORT, "Қайырлы күн")
+    t = env.bot.sent[-1].text
+    assert "Қолдау шаблоны" in t and "телефон нөмірі жоқ" in t and "сипаттамасы" in t and len(t) < 160
+    assert C() == [] and (env.bot.sent[-1].chat, env.bot.sent[-1].thread) == SUPPORT
+    assert not any(c["target_chat"] for c in C())                           # ешқайда көшірілмейді, еске салу жоқ
+    env.clock.add(hours=5); run(service.flush(env.bot))
+    assert len(env.bot.sent) == 1                                          # қайталанбайды
+
+
+def test_support_notice_disappears_when_the_message_is_fixed_by_edit(env):
+    msg = post(env, SELLER(), SUPPORT, "Қайырлы күн")
+    bad = env.bot.sent[-1]
+    msg.text = "Қайырлы күн, 87076665544 оқушы платформаға кіре алмай жатыр"
+    run(bm.handle(msg, env.bot, True))
+    assert (bad.chat, bad.id) in env.bot.deleted
+
+
+def test_support_staff_replies_and_complaint_logic_are_ignored_in_support_topic(env):
+    staff = TECH()                                                         # Бекарыс Алишер - қолдау қызметі
+    post(env, staff, SUPPORT, "Қайырлы кеш✨ Қолдау тобына мәселе жіберген кезде жазыңыздар")
+    reply = post(env, SELLER(), SUPPORT, "87076665544 клиент курсқа кіре алмайды, көмектесіңіз")
+    post(env, staff, SUPPORT, "Қарап жатырмыз", reply=reply.message_id)
+    post(env, SELLER(), SUPPORT, "рахмет", reply=reply.message_id)           # reply - тексерілмейді
+    assert env.bot.sent == [] and C() == []
+
+
+def test_support_screenshot_without_caption_is_prompted_and_with_caption_checked(env):
+    post(env, SELLER(), SUPPORT, None, ctype="photo")
+    assert "Мәтінсіз" in env.bot.sent[-1].text
+    m = M(SELLER(), SUPPORT, caption="87076665544 қолдауға жазған, жауап бермеді, көмектесіңіз", ctype="photo")
+    m.photo = [NS(file_id="x")]
+    n = len(env.bot.sent)
+    run(bm.handle(m, env.bot, False))
+    assert len(env.bot.sent) == n                                          # скрин бар, телефон және сипаттама бар
+
+
+def test_shablon_and_pinall_give_the_support_template_in_the_support_topic():
+    class B(FakeBot):
+        async def get_chat_member(self, chat_id, user_id):
+            return NS(status="administrator")
+
+        async def pin_chat_message(self, *a, **k):
+            pass
+    b = B()
+    sent = []
+
+    async def answer(text, **kw):
+        sent.append(text)
+        return NS(message_id=1, chat=NS(id=SUPPORT[0]))
+    msg = NS(chat=NS(id=SUPPORT[0]), message_thread_id=SUPPORT[1], is_topic_message=True, from_user=NS(id=1), answer=answer)
+    run(bm.cmd_shablon(msg, NS(args=""), b))
+    run(bm.cmd_pinall(msg, b))
+    assert len(sent) == 2 and all("Қолдауға мәселе" in t and "Телефон нөмірі" in t for t in sent)

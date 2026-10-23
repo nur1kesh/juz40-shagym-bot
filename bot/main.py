@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("bot")
 dp = Dispatcher()
 
-BIND_ROLES = {"smart": "smart_hate", "junior": "junior_hate", "external": "external_hate"}
+BIND_ROLES = {"smart": "smart_hate", "junior": "junior_hate", "external": "external_hate", "support": "support_check"}
 
 
 def thread_of(msg: Message) -> int:
@@ -40,7 +40,7 @@ async def is_admin_anywhere(bot: Bot, user_id: int) -> bool:
 async def cmd_help(msg: Message):
     await msg.answer(
         "Шағым ботының командалары:\n"
-        "/bind smart|junior|external — осы topic-ті байлау (админ)\n"
+        "/bind smart|junior|external|support — осы topic-ті байлау (админ); support = ҚОЛДАУ topic-і (тек шаблон тексеру)\n"
         "/shablon — шағым шаблоны (админ: /shablon pin)\n"
         "/shesim — шешім шаблоны (админ: /shesim pin)\n"
         "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
@@ -67,7 +67,8 @@ async def send_template(msg: Message, bot: Bot, text: str, command: CommandObjec
 
 @dp.message(Command("shablon"))
 async def cmd_shablon(msg: Message, command: CommandObject, bot: Bot):
-    await send_template(msg, bot, T.COMPLAINT_HELP, command)
+    role = db.role_of(msg.chat.id, thread_of(msg))
+    await send_template(msg, bot, T.SUPPORT_HELP if role == "support_check" else T.COMPLAINT_HELP, command)
 
 
 @dp.message(Command("shesim"))
@@ -81,7 +82,8 @@ async def cmd_pinall(msg: Message, bot: Bot):
     if not await is_admin(bot, msg.chat.id, msg.from_user.id):
         return
     role = db.role_of(msg.chat.id, thread_of(msg))
-    text = T.COMPLAINT_HELP if role == "external_hate" else T.COMBINED_HELP
+    text = (T.SUPPORT_HELP if role == "support_check"
+            else T.COMPLAINT_HELP if role == "external_hate" else T.COMBINED_HELP)
     m = await msg.answer(text, parse_mode="HTML")
     try:
         await bot.pin_chat_message(msg.chat.id, m.message_id, disable_notification=True)
@@ -97,7 +99,7 @@ async def cmd_bind(msg: Message, command: CommandObject, bot: Bot):
         return
     role = BIND_ROLES.get((command.args or "").strip().lower())
     if not role:
-        return await msg.reply("Қолданылуы: /bind smart | junior | external (сәйкес topic ішінде)")
+        return await msg.reply("Қолданылуы: /bind smart | junior | external | support (сәйкес topic ішінде)")
     db.bind(role, msg.chat.id, thread_of(msg))
     await msg.reply(f"✅ {role} → chat {msg.chat.id}, topic {thread_of(msg)}")
 
@@ -318,7 +320,14 @@ async def handle(msg: Message, bot: Bot, edited: bool):
     rt = msg.reply_to_message
     is_reply = bool(rt) and rt.message_id != msg.message_thread_id and not rt.forum_topic_created
     try:
-        if is_reply:
+        if role == "support_check":
+            # ҚОЛДАУ topic-і: шағым емес, тек шаблон тексеру (reply-лар мен қолдау қызметінің жауаптары елінбейді)
+            if not is_reply and not service.is_support_staff(msg.from_user):
+                if media_only:
+                    await service.process_media_only(bot, msg)
+                else:
+                    await service.process_support_check(bot, msg, edited)
+        elif is_reply:
             if role != "external_hate":
                 handled = await service.process_reply(bot, msg, edited)
                 # reply белгісіз хабарламаға (мысалы, өшіп қалған шаблонға) болса - оқушы аты бойынша іздейміз

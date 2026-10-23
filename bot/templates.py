@@ -67,6 +67,44 @@ COMBINED_HELP = (
     "Шаблонды қайта алу: /shablon · /shesim")
 
 
+# ------------------------------------------------------------------ ҚОЛДАУ topic-і: тек шаблонды тексеру
+SUPPORT_TEMPLATE = "Телефон нөмірі: \nМәселенің сипаттамасы: "
+SUPPORT_HELP = (
+    "📝 <b>Қолдауға мәселе</b> · /shablon\n<code>" + SUPPORT_TEMPLATE + "</code>\n"
+    "Қолдауға жазған болса — чат скринін қоса жіберіңіз.\n"
+    "<blockquote expandable>Не себепті? Біз чатты клиент жазған хабарлама арқылы табамыз, телефон нөмірі болмаса "
+    "табу мүмкін емес. Мәселе дайын жазылса, клиентке қайта хабарласып сұрамаймыз.</blockquote>")
+
+_PHONE_RE = re.compile(r"(?<!\d)\+?\d[\d\s\-()]{8,}\d(?!\d)")
+_GREETING_RE = re.compile(r"(?i)қайырлы\s+(?:күн|кеш|таң)|сәлеметсіз\s+бе|сәлем|добрый\s+(?:день|вечер)|здравствуйте|"
+                          r"телефон\s+нөмірі\s*:?|мәселенің\s+сипаттамасы\s*:?")
+_WROTE_TO_SUPPORT_RE = re.compile(r"(?i)қолдау\w*\s+(?:\S+\s+){0,2}?(?:жаз|хабарлас)|чат\w*\s+(?:\S+\s+){0,2}?жаз|"
+                                  r"(?:написал|писал)\w*\s+в\s+поддержку")
+
+
+def find_phones(text: str) -> list[str]:
+    out = []
+    for m in _PHONE_RE.finditer(text or ""):
+        digits = re.sub(r"\D", "", m.group())
+        if 10 <= len(digits) <= 12:
+            out.append(digits)
+    return out
+
+
+def validate_support(text: str, has_media: bool) -> list[str]:
+    """Қолдау шаблоны: телефон, мәселенің сипаттамасы; қолдауға жазған болса - чат скрині."""
+    errors = []
+    if not find_phones(text):
+        errors.append("телефон нөмірі жоқ")
+    rest = re.sub(r"@\w+|https?://\S+", " ", _PHONE_RE.sub(" ", text or ""))
+    rest = _GREETING_RE.sub(" ", rest)
+    if len(re.findall(r"[A-Za-zА-Яа-яЁёӘІҢҒҮҰҚӨҺәіңғүұқөһ]", rest)) < 15:
+        errors.append("мәселенің сипаттамасы жоқ немесе тым қысқа")
+    if _WROTE_TO_SUPPORT_RE.search(text or "") and not has_media:
+        errors.append("қолдауға жазған болса — чат скринін қосыңыз")
+    return errors
+
+
 def norm(s: str) -> str:
     s = (s or "").lower().replace("ё", "е")
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s)).strip()

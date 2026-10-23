@@ -209,6 +209,36 @@ def _warn_pending_albums():
                  g["chat_id"], g["group_id"])
 
 
+# ---------------------------------------------------------------- ҚОЛДАУ topic-і: тек шаблон тексеру (шағым емес)
+def is_support_staff(user) -> bool:
+    """Қолдау қызметі/тех/координаторлар шаблонды тексеруден босатылған."""
+    return bool(staff_list.role_for(user.full_name) or db.staff_role(user.id) or people.is_roster_user(user))
+
+
+async def process_support_check(bot: Bot, msg, edited: bool = False):
+    """ҚОЛДАУ topic-ке сатушы жазған мәселенің шаблонын тексереді. Ештеңе тіркелмейді, ешқайда көшірілмейді,
+    еске салу жоқ: жетпесе қысқа ескерту, түзетілсе (edit) ескерту өшеді."""
+    text = msg.text or msg.caption
+    if not text or is_support_staff(msg.from_user):
+        return
+    thread = msg.message_thread_id if msg.is_topic_message else 0
+    key = f"{msg.chat.id}:{msg.message_id}"
+    has_media = bool(getattr(msg, "photo", None) or getattr(msg, "document", None) or getattr(msg, "video", None))
+    errors = T.validate_support(text, has_media)
+    if not errors:
+        await clear_notices(bot, key)
+        return
+    try:  # админдерге ескерту жібермейміз
+        m = await bot.get_chat_member(msg.chat.id, msg.from_user.id)
+        if m.status in ("creator", "administrator"):
+            return
+    except Exception:
+        pass
+    queue_notice(key, msg.chat.id, thread, msg.message_id,
+                 "❌ Қолдау шаблоны · /shablon\n• " + "\n• ".join(errors), ttl=15)
+    await flush(bot)
+
+
 # ---------------------------------------------------------------- шағым қабылдау
 async def _fill_auto(parsed: dict) -> dict:
     """Қызметі / мәселе типі / қызметкер аты бос болса, OpenAI мәтін бойынша толтырады."""
