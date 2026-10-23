@@ -236,9 +236,9 @@ def test_sunday_complaint_accepted_reminders_only_monday_and_not_a_flood(env):
 
 # ===================================================================== шаблон тексеру
 def test_invalid_complaint_gets_error_then_edit_registers_it(env):
-    bad = complaint_text(subject="SMART ГЕО")                 # ағын жоқ
+    bad = complaint_text(subject="SMART пәні жоқ")            # пән танылмайды
     msg = post(env, TECH(), SMART, bad)
-    assert C() == [] and "ағын жоқ" in env.bot.sent[0].text
+    assert C() == [] and "танылмады" in env.bot.sent[0].text
     msg.text = complaint_text()
     run(bm.handle(msg, env.bot, True))
     assert len(C()) == 1 and C()[0]["status"] == "open"
@@ -246,7 +246,7 @@ def test_invalid_complaint_gets_error_then_edit_registers_it(env):
 
 def test_errors_and_resolution_work_outside_the_window_too(env):
     env.clock.set(2026, 10, 18, 12, 0)                        # жексенбі
-    msg = post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))
+    msg = post(env, TECH(), SMART, complaint_text(subject="SMART пәні жоқ"))
     assert "Түзетіңіз" in env.bot.sent[0].text                # қате бірден айтылады
     msg.text = complaint_text()
     run(bm.handle(msg, env.bot, True))
@@ -448,7 +448,7 @@ def test_subject_parsing(label, program, pairs):
 def test_bot_messages_are_short(env):
     post(env, TECH(), SMART, "Қайырлы күн, бүгін сабақ қай уақытта басталады екен деп сұрап жатыр, кім біледі?")
     post(env, TECH(), SMART, None, ctype="photo")
-    post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))        # қате
+    post(env, TECH(), SMART, complaint_text(subject="SMART пәні жоқ"))        # қате
     post(env, TECH(), SMART, complaint_text(student="Басқа Бала", desc="x"))   # дұрыс
     env.clock.add(hours=1); run(service.flush(env.bot))                  # еске салу
     for m in env.bot.sent:
@@ -456,7 +456,7 @@ def test_bot_messages_are_short(env):
 
 
 def test_error_notice_is_deleted_when_fixed(env):
-    msg = post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО"))
+    msg = post(env, TECH(), SMART, complaint_text(subject="SMART пәні жоқ"))
     err = env.bot.sent[0]
     msg.text = complaint_text()
     run(bm.handle(msg, env.bot, True))
@@ -1249,7 +1249,7 @@ def test_junior_topic_does_not_require_stream_even_without_the_word_junior(env):
     post(env, TECH(), JUNIOR, complaint_text(subject="Биология"))
     assert len(C()) == 1 and C()[0]["program"] == "junior"
     post(env, TECH(), SMART, complaint_text(student="Басқа Бала", subject="Биология", desc="x"))   # Smart-та ағын керек
-    assert len(C()) == 1 and "ағын жоқ" in env.bot.sent[-1].text
+    assert len(C()) == 2 and "Ағын көрсетілмеген" in env.bot.sent[-1].text      # Smart-та ағынсыз да қабылданады
 
 
 # ===================================================================== ортақ еске салу тізіміне (digest) reply
@@ -1443,3 +1443,47 @@ def test_status_lists_recent_decisions(env):
     post(env, COORD(), SMART, "ертең жазамын", reply=env.bot.sent[0].id)
     st = service.fmt_status()
     assert "Соңғы жауаптарға бот шешімі" in st and "процессте" in st
+
+
+# ===================================================================== ағын көрсетілмесе де қабылдау (супервайзерге)
+NO_STREAM_CAPTION = """Қайырлы күн!
+Жанай Сапар
+77718946341
+
+Мәселе: биология кураторын  ауыстырғысы келеді
+@mereyka_bio140"""
+NO_STREAM_EXT = {"is_complaint": True, "student_name": "Жанай Сапар", "phone": "77718946341", "subject": "БИО",
+                 "employee_name": None, "description": "биология кураторын ауыстырғысы келеді"}
+
+
+def test_screenshot_case_no_stream_is_accepted_and_only_the_supervisor_is_tagged(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=NO_STREAM_EXT))
+    m = M(TECH(), SMART, caption=NO_STREAM_CAPTION, ctype="photo")
+    m.photo = [NS(file_id="x")]
+    run(bm.handle(m, env.bot, False))
+    c = C()
+    assert len(c) == 1 and c[0]["status"] == "open"
+    t = env.bot.sent[0].text
+    assert "@mereyka_bio140" in t and "Ағын көрсетілмеген" in t and "edit" in t          # супервайзер + нұсқау
+    assert "@parvina_bio140" not in t and not any("Түзетіңіз" in x for x in env.bot.texts())
+    p = json.loads(c[0]["parsed"])
+    assert p["no_stream"] is True and p["subject_label"] == "SMART БИО"
+
+
+def test_adding_the_stream_by_edit_tags_the_coordinators_without_a_duplicate_complaint(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=NO_STREAM_EXT))
+    m = M(TECH(), SMART, caption=NO_STREAM_CAPTION, ctype="photo")
+    m.photo = [NS(file_id="x")]
+    run(bm.handle(m, env.bot, False))
+    n = len(env.bot.sent)
+    m.caption = NO_STREAM_CAPTION.replace("Мәселе:", "БИО қыркүйек. Мәселе:")                  # менеджер ағынды қосты
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=dict(NO_STREAM_EXT, subject="БИО қыркүйек")))
+    run(bm.handle(m, env.bot, True))
+    assert len(C()) == 1 and json.loads(C()[0]["parsed"])["pairs"] == [["БИО", "21"]]
+    upd = env.bot.sent[n:]
+    assert len(upd) == 1 and "жаңартылды" in upd[0].text and "@ayaulym_bio140" in upd[0].text   # 21 ағын БИО координаторлары
+
+
+def test_unrecognised_subject_is_still_an_error(env):
+    post(env, TECH(), SMART, complaint_text(subject="SMART жоқ пән"))
+    assert C() == [] and "танылмады" in env.bot.sent[0].text

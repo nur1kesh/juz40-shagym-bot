@@ -164,7 +164,7 @@ def responsible_for(program: str, subjects: list[str], stream: str | None):
     if stream and not by_stream:
         notes.append(f"«{stream}» ағыны тізімде жоқ — тек супервайзер белгіленді")
     if not stream:
-        notes.append("Ағын көрсетілмеген — тек супервайзер белгіленді")
+        notes.append("Ағын көрсетілмеген — тек супервайзер белгіленді. Хабарламаны өңдеп (edit) ағынды қосыңыз: шілде/тамыз/қыркүйек/қазан")
     for s in subjects:
         add(sups, SUPERVISORS.get(s, []))
         found = by_stream.get(s) or (by_stream.get("МАТ") if s == "ГЕОМ" else None)

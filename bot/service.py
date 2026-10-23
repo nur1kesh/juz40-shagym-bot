@@ -324,7 +324,14 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
     else:
         resp, note = {}, ""
     if existing:  # өңделген хабарлама: деректерді жаңартамыз
+        old = json.loads(existing["responsible"] or "{}")
+        key_of = lambda r: {d.get("username") or d["name"] for d in r.get("coords", []) + r.get("sups", [])}  # noqa: E731
         db.update("complaints", existing["id"], text=text, parsed=parsed, responsible=resp, notes=note)
+        if existing["status"] == "open" and existing["target_msg"] and key_of(resp) - key_of(old):
+            c2 = db.q1("SELECT * FROM complaints WHERE id=?", existing["id"])  # ағын қосылды: жаңа адамдар белгіленді
+            await send(bot, c2["target_chat"], c2["target_thread"],
+                       f"🔁 <b>#{c2['id']}</b> жаңартылды · {label(c2)}\n{tags_inline(c2)}", c2["id"],
+                       reply_to=c2["target_msg"])
         return
     tgt = db.binding(f"{program}_hate") if program else None
     status = "new" if program else "awaiting_program"

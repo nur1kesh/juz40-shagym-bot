@@ -216,8 +216,6 @@ def validate_complaint(text: str, default_program: str | None = None):
     if f.get("subject"):
         if not pairs:
             errors.append("«Пән»: танылмады, мысал: SMART ГЕО-31")
-        elif (program or default_program) != "junior" and any(not st for _, st in pairs):
-            errors.append("«Пән»: ағын жоқ, мысал: SMART ГЕО-31")
     if errors:
         return None, errors, f
     parsed = {
@@ -228,6 +226,8 @@ def validate_complaint(text: str, default_program: str | None = None):
         "employee_role": role, "issue_title": title, "description": f["desc"],
         "chat_link": (URL_RE.search(text).group(0) if URL_RE.search(text) else None),
         "mentioned_usernames": re.findall(r"@(\w{4,})", text),
+        # ағын көрсетілмесе қабылдаймыз да, тек супервайзерді белгілейміз (edit арқылы ағын қосылса - координаторлар да)
+        "no_stream": (program or default_program) != "junior" and any(not st for _, st in pairs),
     }
     return parsed, [], f
 
