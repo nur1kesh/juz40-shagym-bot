@@ -47,6 +47,7 @@ async def cmd_help(msg: Message):
         "/open — ашық шағымдар (топта: осы topic; админге жеке чатта: барлығы)\n"
         "/close ID [себебі] — шағымды жабу (админ); шағымға reply етіп /close [себебі] да болады\n"
         "/delete ID — қате шағымды өшіру (админ); шағымға reply етіп /delete да болады\n"
+        "/update ID ағын=21; пән=БИО — жетіспейтін ақпаратты қосу (админ); /update — өрістер тізімі\n"
         "/export [YYYY-MM] [all] — Excel (тек ботқа ЖЕКЕ чатта, админге)\n"
         "/setrole tech|internal — қызметкердің хабарламасына reply етіп рөлін көрсету (админ)\n"
         "/bindings — қазіргі байлаулар\n"
@@ -163,6 +164,31 @@ async def cmd_delete(msg: Message, command: CommandObject, bot: Bot):
     try:
         service.track_ephemeral(ans.chat.id, ans.message_id, 3)
         await service.safe_delete(bot, msg.chat.id, msg.message_id, "/delete командасының өзі")
+    except Exception:
+        pass
+
+
+@dp.message(Command("update", "upd"))
+async def cmd_update(msg: Message, command: CommandObject, bot: Bot):
+    """Админ жетіспейтін ақпаратты қосады: /update 12 ағын=21; пән=БИО  (немесе шағымға reply етіп /update ағын=21)."""
+    if not await is_admin(bot, msg.chat.id, msg.from_user.id):
+        return
+    args = (command.args or "").strip()
+    m = re.match(r"#?(\d+)\s*(.*)", args, re.S)
+    cid, rest = (int(m.group(1)), m.group(2)) if m else (None, args)
+    if cid is None and msg.reply_to_message:
+        c = service.find_complaint(msg.chat.id, msg.reply_to_message.message_id)
+        cid = c["id"] if c else None
+    changes, errors = service.parse_update_args(rest)
+    if cid is None or (not changes and not errors):
+        ans = await msg.reply(service.UPDATE_HELP, parse_mode="HTML")
+    elif not changes:
+        ans = await msg.reply("⚠️ " + "; ".join(errors))
+    else:
+        ok, text = await service.update_complaint(bot, cid, changes)
+        ans = await msg.reply(text + (" · ⚠️ " + "; ".join(errors) if ok and errors else ""))
+    try:
+        service.track_ephemeral(ans.chat.id, ans.message_id, 3)
     except Exception:
         pass
 

@@ -325,13 +325,8 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
         resp, note = {}, ""
     if existing:  # өңделген хабарлама: деректерді жаңартамыз
         old = json.loads(existing["responsible"] or "{}")
-        key_of = lambda r: {d.get("username") or d["name"] for d in r.get("coords", []) + r.get("sups", [])}  # noqa: E731
         db.update("complaints", existing["id"], text=text, parsed=parsed, responsible=resp, notes=note)
-        if existing["status"] == "open" and existing["target_msg"] and key_of(resp) - key_of(old):
-            c2 = db.q1("SELECT * FROM complaints WHERE id=?", existing["id"])  # ағын қосылды: жаңа адамдар белгіленді
-            await send(bot, c2["target_chat"], c2["target_thread"],
-                       f"🔁 <b>#{c2['id']}</b> жаңартылды · {label(c2)}\n{tags_inline(c2)}", c2["id"],
-                       reply_to=c2["target_msg"])
+        await _announce_new_people(bot, existing, old, resp)
         return
     tgt = db.binding(f"{program}_hate") if program else None
     status = "new" if program else "awaiting_program"
@@ -350,6 +345,129 @@ async def process_complaint(bot: Bot, msg, role: str, edited: bool = False):
         db.update("complaints", cid, src_group=msg.media_group_id)
     log.info("complaint #%s created (%s)", cid, status)
     await flush(bot)
+
+
+def _resp_keys(r: dict) -> set:
+    return {d.get("username") or d["name"] for d in r.get("coords", []) + r.get("sups", [])}
+
+
+async def _announce_new_people(bot: Bot, c, old_resp: dict, new_resp: dict):
+    """Жауаптылар тізіміне жаңа адам қосылса (ағын қосылды, пән түзетілді), шағым астында соларды белгілейміз."""
+    if c["status"] != "open" or not c["target_msg"] or not (_resp_keys(new_resp) - _resp_keys(old_resp)):
+        return
+    c2 = db.q1("SELECT * FROM complaints WHERE id=?", c["id"])
+    await send(bot, c2["target_chat"], c2["target_thread"],
+               f"🔁 <b>#{c2['id']}</b> жаңартылды · {label(c2)}\n{tags_inline(c2)}", c2["id"],
+               reply_to=c2["target_msg"])
+
+
+# ---------------------------------------------------------------- админ: шағымды қолмен толықтыру
+UPDATE_FIELDS = {
+    "student": ("оқушы", "ученик", "student", "аты", "аты-жөні"),
+    "phone": ("телефон", "тел", "phone"),
+    "employee": ("қызметкер", "куратор", "мұғалім", "employee"),
+    "role": ("қызметі", "рөл", "role"),
+    "title": ("мәселе", "түрі", "тип", "type", "title", "мәселетипі"),
+    "desc": ("сипаттама", "мәтін", "desc", "description"),
+    "stream": ("ағын", "поток", "stream", "ай"),
+    "subject": ("пән", "предмет", "subject"),
+}
+UPDATE_HELP = ("Қолданылуы: <code>/update 12 ағын=21; пән=БИО</code> немесе шағымға reply етіп "
+               "<code>/update ағын=қыркүйек</code>\nӨрістер: оқушы, телефон, қызметкер, қызметі, мәселе, сипаттама, "
+               "ағын (21 немесе ай аты), пән")
+
+
+def parse_update_args(args: str) -> tuple[dict, list[str]]:
+    """'ағын=21; пән: БИО\nтелефон 8777...' -> ({'stream': '21', 'subject': 'БИО', 'phone': '8777...'}, қателер)"""
+    changes, errors = {}, []
+    for chunk in re.split(r"[;\n]+", args or ""):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = re.match(r"^([^\s:=]+)\s*[:=]?\s*(.+)$", chunk, re.S)
+        if not m:
+            errors.append(f"«{chunk}» түсініксіз")
+            continue
+        name = T.norm(m.group(1)).replace(" ", "")
+        field = next((f for f, names in UPDATE_FIELDS.items() if name in {T.norm(n).replace(" ", "") for n in names}), None)
+        if not field:
+            errors.append(f"«{m.group(1)}» белгісіз өріс")
+            continue
+        changes[field] = m.group(2).strip()
+    return changes, errors
+
+
+async def update_complaint(bot: Bot, cid: int, changes: dict) -> tuple[bool, str]:
+    """Админ жетіспейтін/қате ақпаратты қосады. Пән/ағын өзгерсе жауаптылар қайта есептеледі, жаңалары белгіленеді."""
+    c = db.q1("SELECT * FROM complaints WHERE id=?", cid)
+    if not c or c["status"] == "deleted":
+        return False, "Табылмады немесе өшірілген"
+    p = json.loads(c["parsed"] or "{}")
+    done, errors = [], []
+    for field, val in changes.items():
+        if field == "student":
+            p["student_name"] = val
+        elif field == "phone":
+            p["phone"] = val
+        elif field == "employee":
+            p["employee_name"] = val
+        elif field == "desc":
+            p["description"] = val
+        elif field == "role":
+            m = T.match_enum(val, T.ROLES)
+            if not m:
+                errors.append("«қызметі»: " + " / ".join(T.ROLES))
+                continue
+            p["employee_role"] = m
+        elif field == "title":
+            m = T.match_enum(val, T.ISSUE_TYPES)
+            if not m:
+                errors.append("«мәселе» тізімнен емес (/shablon)")
+                continue
+            p["issue_title"] = m
+        elif field in ("stream", "subject"):
+            continue  # төменде бірге өңделеді
+        done.append(field)
+    pairs = [tuple(x) for x in p.get("pairs") or []]
+    if "subject" in changes:
+        _, new_pairs = T.parse_subject(changes["subject"])
+        if not new_pairs:
+            errors.append("«пән» танылмады, мысал: БИО немесе ФИЗ, МАТ")
+        else:
+            old_stream = next((st for _, st in pairs if st), None)
+            pairs = [(sj, st or old_stream) for sj, st in new_pairs]
+            done.append("subject")
+    if "stream" in changes:
+        raw = changes["stream"].strip()
+        code = raw if re.fullmatch(r"\d{2}", raw) else T.month_stream(raw.upper())
+        if code and code not in STREAM_NAMES:
+            code = None  # белгісіз ағын коды (қате жазылған болуы мүмкін)
+        if not code or not pairs:
+            errors.append("«ағын»: 01/11/21/31/41 немесе шілде/тамыз/қыркүйек/қазан/қараша" if not code
+                          else "алдымен пәнді көрсетіңіз")
+        else:
+            pairs = [(sj, code) for sj, _ in pairs]
+            done.append("stream")
+    if errors and not done:
+        return False, "; ".join(errors)
+    old_resp = json.loads(c["responsible"] or "{}")
+    resp, notes = old_resp, c["notes"]
+    if ("subject" in done or "stream" in done) and c["program"]:
+        p["pairs"] = [list(x) for x in pairs]
+        p["subjects"] = [sj for sj, _ in pairs]
+        p["stream"] = next((st for _, st in pairs if st), None)
+        p["no_stream"] = c["program"] != "junior" and any(not st for _, st in pairs)
+        p["subject_label"] = T.normalize_label(c["program"], pairs)
+        coords, sups, nts = compute_responsible(c["program"], p)
+        resp, notes = resp_json(coords, sups), "; ".join(nts)
+    db.update("complaints", cid, parsed=p, responsible=resp, notes=notes)
+    await _announce_new_people(bot, c, old_resp, resp)
+    kaz = {"student": "оқушы", "phone": "телефон", "employee": "қызметкер", "role": "қызметі", "title": "мәселе",
+           "desc": "сипаттама", "stream": "ағын", "subject": "пән"}
+    msg = "✅ #{} жаңартылды: {}".format(cid, ", ".join(kaz.get(x, x) for x in done))
+    if errors:
+        msg += " · ⚠️ " + "; ".join(errors)
+    return True, msg
 
 
 # ---------------------------------------------------------------- шешім қабылдау

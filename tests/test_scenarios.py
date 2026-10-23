@@ -1487,3 +1487,100 @@ def test_adding_the_stream_by_edit_tags_the_coordinators_without_a_duplicate_com
 def test_unrecognised_subject_is_still_an_error(env):
     post(env, TECH(), SMART, complaint_text(subject="SMART жоқ пән"))
     assert C() == [] and "танылмады" in env.bot.sent[0].text
+
+
+# ===================================================================== /update (админ жетіспейтінді қосады)
+def _update(env, args, reply_to=None, admin=True):
+    out = []
+
+    async def reply(text, **kw):
+        out.append(text)
+        return NS(chat=NS(id=SMART[0]), message_id=888)
+    msg = NS(chat=NS(id=SMART[0]), from_user=NS(id=99 if admin else 5, full_name="Админ"), reply=reply,
+             reply_to_message=NS(message_id=reply_to) if reply_to else None)
+    run(bm.cmd_update(msg, NS(args=args), env.bot))
+    return out
+
+
+def _no_stream_complaint(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "extract_complaint", AsyncMock(return_value=NO_STREAM_EXT))
+    m = M(TECH(), SMART, caption=NO_STREAM_CAPTION, ctype="photo")
+    m.photo = [NS(file_id="x")]
+    run(bm.handle(m, env.bot, False))
+    return m
+
+
+def test_parse_update_args():
+    ch, er = service.parse_update_args("ағын=21; пән: БИО\nтелефон 87001112233; Оқушы = Аты Жөні")
+    assert ch == {"stream": "21", "subject": "БИО", "phone": "87001112233", "student": "Аты Жөні"} and er == []
+    ch, er = service.parse_update_args("бейтаныс=1; ағын 31")
+    assert ch == {"stream": "31"} and er == ["«бейтаныс» белгісіз өріс"]
+
+
+def test_admin_adds_the_missing_stream_and_coordinators_are_tagged(cbot, monkeypatch):
+    env = cbot
+    _no_stream_complaint(env, monkeypatch)
+    cid = C()[0]["id"]
+    n = len(env.bot.sent)
+    out = _update(env, f"{cid} ағын=қыркүйек")
+    assert "жаңартылды" in out[0] and "ағын" in out[0]
+    p = json.loads(C()[0]["parsed"])
+    assert p["pairs"] == [["БИО", "21"]] and p["no_stream"] is False and p["subject_label"] == "SMART БИО-21"
+    upd = env.bot.sent[n:]
+    assert len(upd) == 1 and "@ayaulym_bio140" in upd[0].text and "@mereyka_bio140" in upd[0].text
+    assert "Ағын көрсетілмеген" not in (C()[0]["notes"] or "")
+
+
+def test_update_by_reply_and_several_fields_at_once(cbot, monkeypatch):
+    env = cbot
+    _no_stream_complaint(env, monkeypatch)
+    notify = env.bot.sent[0]
+    out = _update(env, "ағын=11; қызметкер=Аяқөз Қыдырбай; қызметі=мұғалім; мәселе=куратор ауыстыру", reply_to=notify.id)
+    assert "✅" in out[0]
+    p = json.loads(C()[0]["parsed"])
+    assert (p["pairs"], p["employee_name"], p["employee_role"], p["issue_title"]) == (
+        [["БИО", "11"]], "Аяқөз Қыдырбай", "Мұғалім", "Куратор ауыстыру")
+
+
+def test_update_changes_subject_keeping_the_known_stream(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text(subject="SMART ГЕО-31"))
+    _update(env, f"{C()[0]['id']} пән=ФИЗ, МАТ")
+    p = json.loads(C()[0]["parsed"])
+    assert p["pairs"] == [["ФИЗ", "31"], ["МАТ", "31"]] and p["subject_label"] == "SMART ФИЗ-31, МАТ-31"
+    assert "@zhetiruzamira" in env.bot.sent[-1].text                         # 31 ағын ФИЗ координаторы жаңадан белгіленді
+
+
+def test_update_rejects_bad_values_and_unknown_complaints(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    cid = C()[0]["id"]
+    assert "қызметі" in _update(env, f"{cid} қызметі=ойдан")[0]
+    assert "танылмады" in _update(env, f"{cid} пән=жоқ нәрсе")[0]
+    assert "ағын" in _update(env, f"{cid} ағын=99")[0]
+    assert "Табылмады" in _update(env, "9999 ағын=21")[0]
+    assert "Қолданылуы" in _update(env, "")[0]
+    assert json.loads(C()[0]["parsed"])["pairs"] == [["ГЕО", "31"]]          # өзгеріссіз қалды
+
+
+def test_update_requires_admin_and_does_not_retag_when_nothing_new(cbot):
+    env = cbot
+    post(env, TECH(), SMART, complaint_text())
+    cid = C()[0]["id"]
+    assert _update(env, f"{cid} ағын=21", admin=False) == []
+    assert json.loads(C()[0]["parsed"])["pairs"] == [["ГЕО", "31"]]
+    n = len(env.bot.sent)
+    _update(env, f"{cid} оқушы=Жаңа Аты; телефон=87001234567")               # жауаптылар өзгермейді
+    assert len(env.bot.sent) == n and json.loads(C()[0]["parsed"])["student_name"] == "Жаңа Аты"
+
+
+def test_update_corrects_a_resolved_complaint_for_the_excel(cbot):
+    env = cbot
+    m = post(env, TECH(), SMART, complaint_text())
+    post(env, COORD(), SMART, resolution_text(), reply=m.message_id)
+    n = len(env.bot.sent)
+    _update(env, f"{C()[0]['id']} мәселе=Куратор ауыстыру")
+    assert len(env.bot.sent) == n                                           # жабылған шағымға хабарлама жоқ
+    import openpyxl
+    ws = openpyxl.load_workbook(io.BytesIO(exporter.build()))["ТЕХ МЕНЕДЖЕР"]
+    assert ws[2][5].value == "Куратор ауыстыру"
