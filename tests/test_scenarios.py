@@ -82,7 +82,7 @@ class FakeBot:
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     for t in ("bindings", "users", "complaints", "replies", "bot_msgs", "notices", "pending_res",
-              "media_msgs", "media_groups", "ephemeral", "digest_msgs", "deletions", "errors", "decisions"):
+              "media_msgs", "media_groups", "ephemeral", "digest_msgs", "deletions", "errors", "decisions", "tag_topics", "tag_done"):
         db.x(f"DELETE FROM {t}")
     db.bind("smart_hate", *SMART)
     db.bind("junior_hate", *JUNIOR)
@@ -1662,3 +1662,190 @@ def test_shablon_and_pinall_give_the_support_template_in_the_support_topic():
     run(bm.cmd_shablon(msg, NS(args=""), b))
     run(bm.cmd_pinall(msg, b))
     assert len(sent) == 2 and all("Қолдауға мәселе" in t and "Телефон нөмірі" in t for t in sent)
+
+
+# ===================================================================== «#инфо-21»: жауапты координаторларды белгілеу
+from bot import lookup  # noqa: E402
+
+TAGT = (-200, 12)          # хэштегі қосулы topic (мысалы ТӨЛЕМ/САТУ)
+
+
+@pytest.fixture
+def tagenv(env):
+    db.set_tag_topic(*TAGT, True)
+    return env
+
+
+@pytest.mark.parametrize("text,hashtag,expected", [
+    ("Қайырлы күн #инфо-21 рахмет", True, [(None, "ИНФО", "21")]),
+    ("#инфо21 #мат-31", True, [(None, "ИНФО", "21"), (None, "МАТ", "31")]),
+    ("#инфо 21", True, [(None, "ИНФО", "21")]),
+    ("#физ қыркүйек клиент", True, [(None, "ФИЗ", "21")]),
+    ("#ТАРИХ шілде", True, [(None, "ТАРИХ", "01")]),
+    ("#т-21", True, [(None, "ТАРИХ", "21")]),
+    ("#junior-био", True, [("junior", "БИО", None)]),
+    ("#smart хим 11", True, [("smart", "ХИМ", "11")]),
+    ("#инфо", True, [(None, "ИНФО", None)]),
+    ("#привет #123 #бүгін", True, []),
+    ("мәтінде инфо-21 бар, бірақ # жоқ", True, []),
+    ("инфо-21 мат", False, [(None, "ИНФО", "21"), (None, "МАТ", None)]),
+    ("физ шілде, мат 31", False, [(None, "ФИЗ", "01"), (None, "МАТ", "31")]),
+    ("#инфо-21 #инфо-21 #инфо21", True, [(None, "ИНФО", "21")]),                    # қайталанбайды
+])
+def test_parse_codes(text, hashtag, expected):
+    got = [(c["program"], c["subject"], c["stream"]) for c in lookup.parse_codes(text, hashtag)]
+    assert got == expected
+
+
+def test_parse_codes_limit():
+    assert len(lookup.parse_codes(" ".join(f"#мат-{x}" for x in ("01", "11", "21", "31", "41", "51", "61")), True)) == 5
+
+
+def test_hashtag_in_a_tag_topic_replies_to_the_message_with_coordinators_and_supervisor(tagenv):
+    env = tagenv
+    msg = post(env, SELLER(), TAGT, "Қайырлы күн, клиент курсқа кіре алмайды, 87076665544 #инфо-21")
+    r = env.bot.sent[-1]
+    assert r.reply_to == msg.message_id and (r.chat, r.thread) == TAGT
+    assert "ИНФО-21" in r.text and "@niyazbekshugyla" in r.text and "@amina_info140" in r.text
+    assert C() == []                                                         # шағым ретінде тіркелмейді
+
+
+def test_hashtag_is_ignored_outside_tag_topics_and_in_complaint_topics(tagenv):
+    env = tagenv
+    post(env, SELLER(), (-200, 99), "Сәлем #инфо-21")                       # хэштегі қосылмаған topic
+    post(env, TECH(), SMART, "Сәлем #инфо-21 бір нәрсе жаздым, байқап көрейін")  # шағым topic-і
+    assert not any("👥" in m.text for m in env.bot.sent)
+
+
+def test_several_hashtags_in_one_message_and_answered_once(tagenv):
+    env = tagenv
+    msg = post(env, SELLER(), TAGT, "Екі пән бойынша: #мат-31 #физ-31")
+    assert len(env.bot.sent) == 1 and "МАТ-31" in env.bot.sent[0].text and "ФИЗ-31" in env.bot.sent[0].text
+    msg.text += " #хим-31"                                                   # өңдеу: қайта жауап бермейді
+    run(bm.handle(msg, env.bot, True))
+    assert len(env.bot.sent) == 1
+
+
+def test_hashtag_with_edit_added_later_is_answered_once(tagenv):
+    env = tagenv
+    msg = post(env, SELLER(), TAGT, "Клиент курсқа кіре алмайды")           # хэштег жоқ
+    assert env.bot.sent == []
+    msg.text += " #инфо-21"
+    run(bm.handle(msg, env.bot, True))
+    assert len(env.bot.sent) == 1 and "ИНФО-21" in env.bot.sent[0].text
+
+
+def test_hashtag_without_stream_asks_with_buttons_and_the_tap_posts_the_tags(tagenv):
+    env = tagenv
+    msg = post(env, SELLER(), TAGT, "Клиентке көмек керек #инфо")
+    q = env.bot.sent[-1]
+    assert "қай ағын" in q.text and q.reply_to == msg.message_id
+    labels = [b.text for r in q.kb.inline_keyboard for b in r]
+    assert labels == ["шілде 01", "тамыз 11", "қыркүйек 21", "қазан 31", "қараша 41"]
+    data = q.kb.inline_keyboard[0][2].callback_data                          # қыркүйек 21
+    cb = NS(data=data, message=NS(chat=NS(id=TAGT[0]), message_id=q.id, message_thread_id=TAGT[1], is_topic_message=True),
+            answer=AsyncMock())
+    run(bm.cb_koord_stream(cb, env.bot))
+    r = env.bot.sent[-1]
+    assert "ИНФО-21" in r.text and r.reply_to == msg.message_id and "@niyazbekshugyla" in r.text
+    assert (TAGT[0], q.id) in env.bot.deleted                                # түйме хабарламасы жиналды
+
+
+def test_junior_hashtag_tags_the_junior_team(tagenv):
+    env = tagenv
+    post(env, SELLER(), TAGT, "Оқушы 9 сынып #junior-мат")
+    t = env.bot.sent[-1].text
+    assert "JUNIOR МАТ" in t and "@arystanbekova7" in t and "@maqzhan1" in t and "@bayashkarr" not in t
+
+
+def test_stream_41_has_no_coordinators_yet_and_shows_the_supervisor(tagenv):
+    env = tagenv
+    post(env, SELLER(), TAGT, "#гео-41")
+    t = env.bot.sent[-1].text
+    assert "координатор тізімде жоқ" in t and "@Meyrambekovich" in t
+
+
+def test_people_without_username_are_shown_by_name(tagenv):
+    env = tagenv
+    post(env, SELLER(), TAGT, "#тарих-21")
+    assert "Қуанышбек Жансая" in env.bot.sent[-1].text                      # ник жоқ: аты (жуан әріппен)
+
+
+def _cmd(env, text_args, reply_to=None, chat=TAGT):
+    out = []
+
+    async def reply(text, **kw):
+        out.append(("reply", text, kw))
+        return NS(chat=NS(id=chat[0]), message_id=800 + len(out))
+
+    async def answer(text, **kw):
+        out.append(("answer", text, kw))
+        return NS(chat=NS(id=chat[0]), message_id=800 + len(out))
+    msg = NS(chat=NS(id=chat[0]), message_thread_id=chat[1], is_topic_message=True, message_id=555, reply=reply,
+             answer=answer, from_user=NS(id=1), reply_to_message=NS(message_id=reply_to) if reply_to else None)
+    run(bm.cmd_koord(msg, NS(args=text_args), env.bot))
+    return out
+
+
+def test_koord_command_replies_to_the_command_or_to_the_replied_message(env):
+    _cmd(env, "инфо-21")
+    assert env.bot.sent[-1].reply_to == 555 and "ИНФО-21" in env.bot.sent[-1].text
+    _cmd(env, "мат шілде", reply_to=4242)                                    # басқа адамның хабарламасына reply
+    assert env.bot.sent[-1].reply_to == 4242 and "МАТ-01" in env.bot.sent[-1].text
+
+
+def test_koord_unknown_subject_shows_a_hint(env):
+    out = _cmd(env, "жоқ нәрсе")
+    assert out[0][0] == "reply" and "Пән танылмады" in out[0][1] and env.bot.sent == []
+
+
+def test_koord_menu_flow_with_buttons(env):
+    out = _cmd(env, "")
+    kb = out[0][2]["reply_markup"]
+    assert [b.text for r in kb.inline_keyboard for b in r] == ["SMART", "JUNIOR"]
+    edits = []
+
+    class Msg:
+        chat, message_id, message_thread_id, is_topic_message = NS(id=TAGT[0]), 1, TAGT[1], True
+
+        async def edit_text(self, text, reply_markup=None, **kw):
+            edits.append((text, reply_markup))
+    cb = lambda data: NS(data=data, message=Msg(), answer=AsyncMock())  # noqa: E731
+    run(bm.cb_koord_menu(cb("km:p:s:555"), env.bot))                         # SMART -> пәндер
+    assert edits[-1][0] == "Қай пән?" and "ИНФО" in [b.text for r in edits[-1][1].inline_keyboard for b in r]
+    run(bm.cb_koord_menu(cb("km:s:s:ИНФО:555"), env.bot))                    # ИНФО -> ағындар
+    assert "қай ағын" in edits[-1][0]
+    run(bm.cb_koord_stream(cb("kq:s:ИНФО:31:555"), env.bot))                 # 31 қазан -> нәтиже
+    assert "ИНФО-31" in env.bot.sent[-1].text and "@elnurqwe" in env.bot.sent[-1].text and env.bot.sent[-1].reply_to == 555
+    run(bm.cb_koord_menu(cb("km:s:j:МАТ:555"), env.bot))                     # JUNIOR МАТ -> бірден нәтиже
+    assert "JUNIOR МАТ" in env.bot.sent[-1].text
+
+
+def test_tags_command_toggles_the_topic_and_is_admin_only(cbot):
+    env = cbot
+    out = []
+
+    async def reply(text, **kw):
+        out.append(text)
+    mk = lambda admin: NS(chat=NS(id=TAGT[0]), message_thread_id=TAGT[1], is_topic_message=True,  # noqa: E731
+                          from_user=NS(id=99 if admin else 5), reply=reply)
+    run(bm.cmd_tags(mk(False), NS(args="on"), env.bot))
+    assert out == [] and not db.is_tag_topic(*TAGT)
+    run(bm.cmd_tags(mk(True), NS(args="on"), env.bot))
+    assert db.is_tag_topic(*TAGT) and "қосылды" in out[-1]
+    post(env, SELLER(), TAGT, "#инфо-21")
+    assert any("ИНФО-21" in m.text for m in env.bot.sent)
+    run(bm.cmd_tags(mk(True), NS(args="off"), env.bot))
+    assert not db.is_tag_topic(*TAGT)
+
+
+def test_bind_tag_alias_enables_hashtags(cbot):
+    env = cbot
+    out = []
+
+    async def reply(text, **kw):
+        out.append(text)
+    msg = NS(chat=NS(id=TAGT[0]), message_thread_id=TAGT[1], is_topic_message=True, from_user=NS(id=99), reply=reply)
+    run(bm.cmd_bind(msg, NS(args="tag"), env.bot))
+    assert db.is_tag_topic(*TAGT) and "Хэштег қосылды" in out[0]
+    assert db.role_of(*TAGT) is None                                         # басқа рөл байланбайды

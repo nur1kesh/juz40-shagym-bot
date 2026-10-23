@@ -9,7 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
 
-from . import ai, db, people, staff as staff_list, templates as T
+from . import ai, db, lookup, people, staff as staff_list, templates as T
 from .config import REMINDER_EVERY_MIN, SLA_HOURS, TZ, in_work_window, now
 from .roster import STREAM_NAMES, responsible_for
 
@@ -207,6 +207,32 @@ def _warn_pending_albums():
                          MEDIA_NOTICE)
             db.x("UPDATE media_groups SET status='warned' WHERE chat_id=? AND group_id=?",
                  g["chat_id"], g["group_id"])
+
+
+# ---------------------------------------------------------------- «#инфо-21»: жауапты координаторларды белгілеу
+async def send_coordinators(bot: Bot, chat_id: int, thread: int, reply_to: int, codes: list[dict]):
+    """Менеджердің хабарламасына reply етіп координаторлар мен супервайзерді белгілейді; ағыны жоқ кодқа түймелер."""
+    text, pending = lookup.render(codes)
+    if text:
+        await send(bot, chat_id, thread, text, None, reply_to=reply_to)
+    for code in pending:
+        await send(bot, chat_id, thread, f"❓ <b>{html.escape(lookup.label(code))}</b>: қай ағын?", None,
+                   reply_to=reply_to, markup=lookup.stream_kb(code, reply_to))
+
+
+async def process_hashtags(bot: Bot, msg):
+    """Хэштегі қосулы topic-те «#инфо-21» жазылса - жауаптыларды белгілейді (бір хабарламаға бір рет)."""
+    text = msg.text or msg.caption
+    if not text or "#" not in text:
+        return
+    codes = lookup.parse_codes(text, hashtag_only=True)
+    if not codes:
+        return
+    thread = msg.message_thread_id if msg.is_topic_message else 0
+    if db.q1("SELECT 1 FROM tag_done WHERE chat_id=? AND msg_id=?", msg.chat.id, msg.message_id):
+        return
+    db.x("INSERT OR IGNORE INTO tag_done VALUES(?,?)", msg.chat.id, msg.message_id)
+    await send_coordinators(bot, msg.chat.id, thread, msg.message_id, codes)
 
 
 # ---------------------------------------------------------------- ҚОЛДАУ topic-і: тек шаблон тексеру (шағым емес)
@@ -897,6 +923,7 @@ def fmt_status() -> str:
              "Шағымдар: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "жоқ"),
              f"Кезекте ескерту: {db.q1('SELECT COUNT(*) n FROM notices WHERE sent=0')['n']} · "
              f"өшуі күтілетін хабарлама: {db.q1('SELECT COUNT(*) n FROM ephemeral')['n']}"]
+    lines.append(f"Хэштег (#инфо-21) қосулы topic: {db.q1('SELECT COUNT(*) n FROM tag_topics')['n']}")
     binds = db.q("SELECT role, chat_id, thread_id FROM bindings")
     lines.append("Байлау: " + (", ".join(f"{b['role']}→{b['thread_id']}" for b in binds) or "жоқ"))
     dels = db.q("SELECT * FROM deletions ORDER BY id DESC LIMIT 6")

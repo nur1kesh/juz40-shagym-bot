@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, Message
 
-from . import ai, db, exporter, people, service, templates as T
+from . import ai, db, exporter, lookup, people, service, templates as T
 from .config import BOT_TOKEN, now
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,6 +41,8 @@ async def cmd_help(msg: Message):
     await msg.answer(
         "Шағым ботының командалары:\n"
         "/bind smart|junior|external|support — осы topic-ті байлау (админ); support = ҚОЛДАУ topic-і (тек шаблон тексеру)\n"
+        "/bind tag (немесе /tags on) — осы topic-те #инфо-21 хэштегімен координаторларды белгілеу (админ)\n"
+        "/koord инфо-21 — координаторларды белгілеу; /koord жалғыз — түймелермен\n"
         "/shablon — шағым шаблоны (админ: /shablon pin)\n"
         "/shesim — шешім шаблоны (админ: /shesim pin)\n"
         "/pinall — екі шаблонды бірден pin жасайды (админ)\n"
@@ -93,10 +95,45 @@ async def cmd_pinall(msg: Message, bot: Bot):
         service.track_ephemeral(m.chat.id, m.message_id, 5)
 
 
+@dp.message(Command("koord", "coord"))
+async def cmd_koord(msg: Message, command: CommandObject, bot: Bot):
+    """/koord инфо-21 - жауапты координаторларды белгілейді; /koord жалғыз - түймелермен таңдау."""
+    thread = thread_of(msg)
+    orig = msg.reply_to_message.message_id if msg.reply_to_message else msg.message_id
+    args = (command.args or "").strip()
+    if not args:
+        m = await msg.answer("Қай бағдарлама?", reply_markup=lookup.program_kb(orig))
+        service.track_ephemeral(m.chat.id, m.message_id, 5)
+        return
+    codes = lookup.parse_codes(args, hashtag_only=False)
+    if not codes:
+        m = await msg.reply(lookup.UNKNOWN)
+        service.track_ephemeral(m.chat.id, m.message_id, 3)
+        return
+    await service.send_coordinators(bot, msg.chat.id, thread, orig, codes)
+
+
+@dp.message(Command("tags"))
+async def cmd_tags(msg: Message, command: CommandObject, bot: Bot):
+    """Админ: осы topic-те #инфо-21 хэштегін қосады/өшіреді (/tags on, /tags off)."""
+    if not await is_admin(bot, msg.chat.id, msg.from_user.id):
+        return
+    arg = (command.args or "").strip().lower()
+    if arg not in ("on", "off"):
+        on = db.is_tag_topic(msg.chat.id, thread_of(msg))
+        return await msg.reply(f"Хэштег осы topic-те {'қосулы' if on else 'өшірулі'}. /tags on | /tags off\n" + lookup.HELP,
+                               parse_mode="HTML")
+    db.set_tag_topic(msg.chat.id, thread_of(msg), arg == "on")
+    await msg.reply("✅ Хэштег қосылды: #инфо-21 дегенде координаторлар белгіленеді" if arg == "on" else "✅ Хэштег өшірілді")
+
+
 @dp.message(Command("bind"))
 async def cmd_bind(msg: Message, command: CommandObject, bot: Bot):
     if not await is_admin(bot, msg.chat.id, msg.from_user.id):
         return
+    if (command.args or "").strip().lower() == "tag":  # хэштегті тыңдайтын topic (бір топта көп болуы мүмкін)
+        db.set_tag_topic(msg.chat.id, thread_of(msg), True)
+        return await msg.reply("✅ Хэштег қосылды: #инфо-21 дегенде координаторлар белгіленеді")
     role = BIND_ROLES.get((command.args or "").strip().lower())
     if not role:
         return await msg.reply("Қолданылуы: /bind smart | junior | external | support (сәйкес topic ішінде)")
@@ -107,8 +144,10 @@ async def cmd_bind(msg: Message, command: CommandObject, bot: Bot):
 @dp.message(Command("bindings"))
 async def cmd_bindings(msg: Message):
     rows = db.q("SELECT * FROM bindings")
-    await msg.reply("\n".join(f"{r['role']}: chat {r['chat_id']}, topic {r['thread_id']}" for r in rows)
-                    or "Байлау жоқ")
+    tags = db.q("SELECT * FROM tag_topics")
+    lines = [f"{r['role']}: chat {r['chat_id']}, topic {r['thread_id']}" for r in rows]
+    lines += [f"хэштег: chat {t['chat_id']}, topic {t['thread_id']}" for t in tags]
+    await msg.reply("\n".join(lines) or "Байлау жоқ")
 
 
 @dp.message(Command("open"))
@@ -272,6 +311,42 @@ async def cb_pick(cb: CallbackQuery, bot: Bot):
     await cb.answer(result, show_alert=not result.startswith("✅"))
 
 
+def _thread_of_cb(cb: CallbackQuery) -> int:
+    m = cb.message
+    return m.message_thread_id if getattr(m, "is_topic_message", False) else 0
+
+
+@dp.callback_query(F.data.startswith("km:"))
+async def cb_koord_menu(cb: CallbackQuery, bot: Bot):
+    """/koord түймелері: бағдарлама -> пән -> (ағын)."""
+    parts = cb.data.split(":")
+    kind, orig = parts[1], int(parts[-1])
+    if kind == "p":
+        await cb.message.edit_text("Қай пән?", reply_markup=lookup.subject_kb(parts[2], orig))
+    elif kind == "s":
+        p, subj = parts[2], parts[3]
+        code = {"program": "junior" if p == "j" else None, "subject": subj, "stream": None}
+        if p == "j":
+            await _finish_koord(cb, bot, [code], orig)
+        else:
+            await cb.message.edit_text(f"{subj}: қай ағын?", reply_markup=lookup.stream_kb(code, orig))
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("kq:"))
+async def cb_koord_stream(cb: CallbackQuery, bot: Bot):
+    _, p, subj, stream, orig = cb.data.split(":")
+    code = {"program": "junior" if p == "j" else None, "subject": subj, "stream": None if p == "j" else stream}
+    await _finish_koord(cb, bot, [code], int(orig))
+    await cb.answer()
+
+
+async def _finish_koord(cb: CallbackQuery, bot: Bot, codes: list, orig: int):
+    """Таңдау аяқталды: менеджердің хабарламасына reply етіп белгілейміз, түйме хабарламасын жинаймыз."""
+    await service.send_coordinators(bot, cb.message.chat.id, _thread_of_cb(cb), orig, codes)
+    await service.safe_delete(bot, cb.message.chat.id, cb.message.message_id, "координатор таңдауы аяқталды")
+
+
 @dp.callback_query(F.data.startswith("dr:"))
 async def cb_draft(cb: CallbackQuery, bot: Bot):
     _, cid, field, idx = cb.data.split(":")
@@ -312,6 +387,11 @@ async def handle(msg: Message, bot: Bot, edited: bool):
     db.remember_user(msg.from_user)
     if msg.text and msg.text.startswith("/"):
         return
+    if (msg.text or msg.caption) and db.is_tag_topic(msg.chat.id, thread_of(msg)):
+        try:
+            await service.process_hashtags(bot, msg)
+        except Exception:
+            log.exception("hashtag handler error")
     role = db.role_of(msg.chat.id, thread_of(msg))
     if not role:
         return  # бағыт topic-інен тыс ештеңе істемейміз

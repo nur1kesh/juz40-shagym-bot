@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS errors(
 CREATE TABLE IF NOT EXISTS decisions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, chat_id INTEGER, msg_id INTEGER, complaint_id INTEGER,
   who TEXT, outcome TEXT);
+CREATE TABLE IF NOT EXISTS tag_topics(
+  chat_id INTEGER, thread_id INTEGER, PRIMARY KEY(chat_id, thread_id));
+CREATE TABLE IF NOT EXISTS tag_done(
+  chat_id INTEGER, msg_id INTEGER, PRIMARY KEY(chat_id, msg_id));
 CREATE INDEX IF NOT EXISTS ix_c_status ON complaints(status);
 """)
 for col in ("review_needed", "review_asked"):
@@ -126,6 +130,18 @@ def binding(role):
 def role_of(chat_id, thread_id):
     r = q1("SELECT role FROM bindings WHERE chat_id=? AND thread_id=?", chat_id, thread_id)
     return r["role"] if r else None
+
+
+# --- хэштег (координаторды белгілеу) topic-тері
+def set_tag_topic(chat_id, thread_id, on: bool):
+    if on:
+        x("INSERT OR IGNORE INTO tag_topics VALUES(?,?)", chat_id, thread_id)
+    else:
+        x("DELETE FROM tag_topics WHERE chat_id=? AND thread_id=?", chat_id, thread_id)
+
+
+def is_tag_topic(chat_id, thread_id) -> bool:
+    return q1("SELECT 1 FROM tag_topics WHERE chat_id=? AND thread_id=?", chat_id, thread_id) is not None
 
 
 # --- users
