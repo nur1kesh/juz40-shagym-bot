@@ -282,12 +282,37 @@ def synth_resolution(student: str, ext: dict, fallback_text: str = "") -> str:
     ])
 
 
+# «Мәселе шешілді» сияқты мазмұнсыз сөздер: бұлар «қалай шешілгенін» түсіндірмейді
+_VAGUE_WORDS = {
+    "мәселе", "мәселесі", "мәселені", "шешілді", "шешілген", "шешіліп", "шешілмеді", "шешті", "шештік", "шештім", "шешемін",
+    "бәрі", "барлығы", "жақсы", "ок", "окей", "болды", "дайын", "жабылды", "орындалды", "сөйлестім", "сөйлестік", "сөйлесті",
+    "байланыстым", "байланыстық", "байланысты", "қабылданды", "түсінікті", "рахмет", "иә", "жоқ", "және", "мен", "бен", "пен",
+    "решено", "решили", "решил", "все", "хорошо", "готово", "проблема", "вопрос", "ок", "да", "нет", "ага",
+}
+
+
+def is_vague_solution(solution: str, student: str | None = None) -> bool:
+    """Шешім мәтінінде оқушы аты мен «шешілді/сөйлестім» сияқты жалпы сөздерден басқа кемінде 2 мазмұнды сөз бар ма?
+    «Дилара Сагадатовамен мәселе шешілді✅» - мазмұнсыз; «куратор ауыстырылды, ескерту берілді» - мазмұнды."""
+    name = [t for t in norm(student or "").split() if len(t) >= 4]
+    meaningful = []
+    for t in norm(solution).split():
+        if len(t) < 3 or t in _VAGUE_WORDS:
+            continue
+        if any(t.startswith(n[:5]) or n.startswith(t[:5]) for n in name):
+            continue  # оқушы аты (септіктерімен: «Сагадатовамен»)
+        meaningful.append(t)
+    return len(meaningful) < 2
+
+
 def validate_resolution(text: str, student_expected: str | None):
     f = parse(text, RESOLUTION_LABELS)
     errors = []
     sol = f.get("solution", "").strip()
     if len(sol) < 30:
         errors.append("«Шешім»: тым қысқа (кемі 30 символ, не істелгенін жазыңыз)")
+    elif is_vague_solution(sol, student_expected):
+        errors.append("«Шешім»: қалай шешілгенін жазыңыз (кіммен сөйлестіңіз, не істелді)")
     just = match_enum(f.get("justified", ""), JUSTIFIED)
     sat = match_enum(f.get("satisfied", ""), SATISFIED)
     stay = match_enum(f.get("stayed", ""), STAYED)

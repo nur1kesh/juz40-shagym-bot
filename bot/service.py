@@ -598,7 +598,10 @@ async def process_reply(bot: Bot, msg, edited: bool = False) -> bool:
             return True
         res = await _free_reply(text, c)
         has_fields = any(res.get(k) for k in ("satisfied", "justified", "stayed"))
-        if res["kind"] == "resolution" or (_get_draft(c) and has_fields):
+        draft = _get_draft(c)
+        awaiting_solution = bool(draft) and not draft.get("solution") and not T.is_vague_solution(
+            text, json.loads(c["parsed"] or "{}").get("student_name"))
+        if res["kind"] == "resolution" or (draft and has_fields) or awaiting_solution:
             _decide(msg, c, "шешім (шаблонсыз): жоба толтырылуда")
             await _react(bot, msg, OFFER_REACTION)
             await advance_draft(bot, msg, c, res, thread, key)
@@ -626,7 +629,11 @@ async def process_followup(bot: Bot, msg):
     if not c:
         return
     res = await ai.classify_reply(text, c["text"])
-    if res and (res["kind"] == "resolution" or any(res.get(k) for k in ("satisfied", "justified", "stayed"))):
+    draft = _get_draft(c)
+    awaiting_solution = bool(draft) and not draft.get("solution") and not T.is_vague_solution(
+        text, json.loads(c["parsed"] or "{}").get("student_name"))
+    if res and (res["kind"] == "resolution" or awaiting_solution
+                or any(res.get(k) for k in ("satisfied", "justified", "stayed"))):
         _decide(msg, c, "толықтыру (reply-сыз): жоба жаңартылды")
         await advance_draft(bot, msg, c, res, thread, f"{msg.chat.id}:{msg.message_id}")
 
@@ -661,7 +668,22 @@ def _put_draft(cid: int, d: dict, user_id: int):
 
 
 def _missing(d: dict) -> list:
-    return [f for f, _, _ in DRAFT_FIELDS if not d.get(f)]
+    """Алдымен «қалай шешілді» (мазмұнды шешім мәтіні), содан кейін түймелі өрістер."""
+    return (["solution"] if not d.get("solution") else []) + [f for f, _, _ in DRAFT_FIELDS if not d.get(f)]
+
+
+# өрісті OpenAI толтырса да, мәтінде соған сай сөз болмаса, қабылдамаймыз (жорамал қосылып кетпесін)
+_GROUNDING = {
+    "satisfied": ("риза", "рази", "келіс", "қанағат", "наразы", "доволен", "согласен"),
+    "stayed": ("қал", "кет", "бас тарт", "курс", "осталс", "ушел", "уход"),
+    "justified": ("негізд", "дәлел", "расталд", "дұрыс", "кінәл", "шындық", "подтвержд", "обоснован", "кб бермеді",
+                  "кері байланыс"),
+}
+
+
+def _grounded(field: str, text: str) -> bool:
+    n = T.norm(text)
+    return any(w in n for w in _GROUNDING[field])
 
 
 def active_draft_complaint(user_id: int, chat_id: int, thread: int):
@@ -686,10 +708,14 @@ def _question_kb(cid: int, field: str):
 
 
 async def _ask_next(bot: Bot, c, d: dict, field: str, reply_to: int | None):
-    """Жетпейтін бір ғана сұрақ, түймелермен. Алдыңғы сұрақ хабарламасы болса - соны жаңартады."""
-    question = next(q for f, q, _ in DRAFT_FIELDS if f == field)
-    text = f"❓ <b>#{c['id']}</b> · {html.escape(question)}"
-    kb = _question_kb(c["id"], field)
+    """Жетпейтін бір ғана сұрақ: «қалай шешілді» (мәтін) немесе түймелі өріс. Алдыңғы сұрақ хабарламасы болса - соны жаңартады."""
+    if field == "solution":
+        text = f"❓ <b>#{c['id']}</b> · Қалай шешілді? Кіммен сөйлестіңіз, не істелді — қысқаша жазыңыз (осы хабарламаға reply)."
+        kb = None
+    else:
+        question = next(q for f, q, _ in DRAFT_FIELDS if f == field)
+        text = f"❓ <b>#{c['id']}</b> · {html.escape(question)}"
+        kb = _question_kb(c["id"], field)
     prompt = d.get("prompt")
     if prompt:
         try:
@@ -706,7 +732,7 @@ async def _ask_next(bot: Bot, c, d: dict, field: str, reply_to: int | None):
 
 async def _finish_draft(bot: Bot, c, d: dict, by: str) -> list:
     student = json.loads(c["parsed"] or "{}").get("student_name") or ""
-    tpl = T.synth_resolution(student, d, d.get("solution") or c["text"])
+    tpl = T.synth_resolution(student, d, d.get("solution") or "")
     final, errors, _ = T.validate_resolution(tpl, student)
     if errors:
         return errors
@@ -724,15 +750,17 @@ async def _finish_draft(bot: Bot, c, d: dict, by: str) -> list:
 
 
 async def advance_draft(bot: Bot, msg, c, ext: dict, thread: int, key: str):
-    """Шаблонсыз шешімнен жоба жинаймыз: бар өрістер алынады, жетпейтінін түймемен сұраймыз, бәрі болса жабамыз."""
+    """Шаблонсыз шешімнен жоба жинаймыз: мәтінде НАҚТЫ айтылған өрістер алынады, «қалай шешілді» мазмұнды болуы тиіс,
+    жетпейтінін (мәтін/түймемен) сұраймыз, бәрі толғанда ғана жабамыз."""
     d = _get_draft(c)
+    text = (msg.text or msg.caption or "").strip()
+    student = json.loads(c["parsed"] or "{}").get("student_name") or ""
     for k in ("justified", "satisfied", "stayed"):
-        if ext.get(k):
+        if ext.get(k) and _grounded(k, text):
             d[k] = ext[k]
-    if ext.get("solution") and not d.get("solution"):
-        d["solution"] = ext["solution"]
-    if not d.get("solution"):
-        d["solution"] = (msg.text or msg.caption or "").strip()
+    cand = ext.get("solution") or text
+    if not d.get("solution") and not T.is_vague_solution(cand, student) and len(cand) >= 30:
+        d["solution"] = cand                      # мазмұнсыз «мәселе шешілді» шешім ретінде қабылданбайды
     _put_draft(c["id"], d, msg.from_user.id)
     c = db.q1("SELECT * FROM complaints WHERE id=?", c["id"])
     missing = _missing(d)
@@ -754,8 +782,6 @@ async def apply_draft_choice(bot: Bot, c, field: str, idx: int, user) -> str:
         return "Қате түйме"
     d = _get_draft(c)
     d[field] = opts[idx]
-    if not d.get("solution"):
-        d["solution"] = c["text"]
     _put_draft(c["id"], d, user.id)
     c = db.q1("SELECT * FROM complaints WHERE id=?", c["id"])
     missing = _missing(d)

@@ -1180,15 +1180,12 @@ def test_long_concrete_solution_is_accepted_without_ai_gate(env, monkeypatch):
     assert f["satisfied"] == "Иә" and f["stayed"] == "Иә"                  # «Иә, риза» да «Иә» деп танылды
 
 
-def test_short_vague_solution_still_goes_through_the_ai_gate(env, monkeypatch):
-    gate = AsyncMock(return_value={"ok": False, "reason": "нақтылаңыз"})
-    monkeypatch.setattr(service.ai, "check_solution", gate)
+def test_short_vague_solution_is_rejected_with_a_hint(env, monkeypatch):
     post(env, TECH(), SMART, complaint_text())
     short = resolution_text().replace("Оқушымен байланысқа шықтық, себебі анықталды, кураторға ескерту жасалды.",
                                       "Мәселе шешілді, оқушымен сөйлестім, бәрі жақсы")
     post(env, COORD(), SMART, short, reply=env.bot.sent[0].id)
-    gate.assert_awaited()
-    assert C()[0]["status"] == "open"
+    assert C()[0]["status"] == "open" and "қалай шешілгенін" in env.bot.sent[-1].text
 
 
 # ===================================================================== ағын ай аты бойынша (шілде 01 ... қараша 41)
@@ -1850,3 +1847,78 @@ def test_bind_tag_alias_enables_hashtags(cbot):
     run(bm.cmd_bind(msg, NS(args="tag"), env.bot))
     assert db.is_tag_topic(*TAGT) and "Хэштег қосылды" in out[0]
     assert db.role_of(*TAGT) is None                                         # басқа рөл байланбайды
+
+
+# ===================================================================== «қалай шешілді» міндетті: мазмұнсыз «мәселе шешілді» қабылданбайды
+@pytest.mark.parametrize("solution,student,vague", [
+    ("Дилара Сагадатовамен мәселе шешілді✅", "Дилара Сагадатова", True),
+    ("мәселе шешілді", "Дилара Сагадатова", True),
+    ("Мәселе шешілді, оқушымен сөйлестім, бәрі жақсы", None, True),
+    ("Дилара Сагадатовамен сөйлестім, шешілді", "Дилара Сагадатова", True),
+    ("решено, все хорошо", None, True),
+    ("куратор ауыстырылды, ескерту берілді", None, False),
+    ("Ата-анамен сөйлестік, куратор ауыстырылды", "Дилара Сагадатова", False),
+    ("Оқушы қыркүйек ағынына ауыстырылды, тақырыптарды қайта бастайды", None, False),
+    ("доступ ашылды, оқушы платформаға кірді", None, False),
+])
+def test_is_vague_solution(solution, student, vague):
+    assert T.is_vague_solution(solution, student) is vague
+
+
+VAGUE = "Дилара Сагадатовамен мәселе шешілді✅"
+
+
+def test_vague_resolution_is_not_accepted_and_the_bot_asks_how_it_was_resolved(env, monkeypatch):
+    """Шын чат (#13): «Дилара Сагадатовамен мәселе шешілді✅» шағымды жауып жіберген."""
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": None, "satisfied": "Иә", "justified": "Негізделген", "stayed": "Иә"}))  # модель жорамалдаса да
+    post(env, TECH(), SMART, complaint_text(student="Дилара Сагадатова"))
+    post(env, COORD(), SMART, VAGUE, reply=env.bot.sent[0].id)
+    c = C()[0]
+    assert c["status"] == "open"                                              # жабылмады
+    d = json.loads(c["draft"])
+    assert "solution" not in d and not any(k in d for k in ("justified", "satisfied", "stayed"))   # жорамал өрістер алынбады
+    q = env.bot.sent[-1]
+    assert "Қалай шешілді" in q.text and q.kb is None                         # мәтінмен жауап сұралды
+
+
+def test_after_the_details_are_given_the_normal_buttons_follow_and_the_complaint_closes(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(side_effect=[
+        {"kind": "resolution", "solution": None, "satisfied": None, "justified": None, "stayed": None},
+        {"kind": "resolution", "solution": "Ата-анамен сөйлестік, куратор ауыстырылды, оқушы курста қалады",
+         "satisfied": None, "justified": None, "stayed": None}]))
+    post(env, TECH(), SMART, complaint_text(student="Дилара Сагадатова"))
+    coord = COORD()
+    post(env, coord, SMART, VAGUE, reply=env.bot.sent[0].id)
+    prompt = env.bot.sent[-1]
+    post(env, coord, SMART, "Ата-анамен сөйлестік, куратор ауыстырылды, оқушы курста қалады", reply=prompt.id)
+    d = json.loads(C()[0]["draft"])
+    assert d["solution"].startswith("Ата-анамен сөйлестік")
+    assert C()[0]["status"] == "open" and env.bot.edited[-1][2].count("негізделген") == 1      # енді түймелі сұрақ
+    cid = C()[0]["id"]
+    tap(env, cid, "justified", 0)
+    tap(env, cid, "satisfied", 0)
+    tap(env, cid, "stayed", 0)
+    c = C()[0]
+    assert c["status"] == "resolved" and json.loads(c["final"])["edu_response"].startswith("Ата-анамен сөйлестік")
+
+
+def test_vague_text_in_the_template_is_rejected_too(env):
+    post(env, TECH(), SMART, complaint_text(student="Дилара Сагадатова"))
+    bad = resolution_text(student="Дилара Сагадатова").replace(
+        "Оқушымен байланысқа шықтық, себебі анықталды, кураторға ескерту жасалды.",
+        "Дилара Сагадатовамен мәселе шешілді, бәрі жақсы болды")
+    post(env, COORD(), SMART, bad, reply=env.bot.sent[0].id)
+    assert C()[0]["status"] == "open" and "қалай шешілгенін" in env.bot.sent[-1].text
+
+
+def test_fields_not_stated_in_the_text_are_not_trusted_but_stated_ones_are(env, monkeypatch):
+    monkeypatch.setattr(service.ai, "classify_reply", AsyncMock(return_value={
+        "kind": "resolution", "solution": "Ата-анамен сөйлестік, куратор ауыстырылды",
+        "satisfied": "Иә", "justified": "Негізделген", "stayed": "Иә"}))
+    post(env, TECH(), SMART, complaint_text())
+    # мәтінде тек «риза» айтылған: «Иә» риза ғана алынады, қалғаны түймемен сұралады
+    post(env, COORD(), SMART, "Ата-анамен сөйлестік, куратор ауыстырылды, оқушы риза", reply=env.bot.sent[0].id)
+    d = json.loads(C()[0]["draft"])
+    assert d.get("satisfied") == "Иә" and "justified" not in d and "stayed" not in d
+    assert C()[0]["status"] == "open"
